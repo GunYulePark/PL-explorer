@@ -77,6 +77,7 @@ export function PnlWorkspace() {
   const [authReady, setAuthReady] = useState(!hasClient);
   const [email, setEmail] = useState("");
   const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [showLogin, setShowLogin] = useState(false);
 
   useEffect(() => {
     if (!configuredClient) return;
@@ -206,8 +207,6 @@ export function PnlWorkspace() {
     setAuthMessage(error ? `로그인 링크 발송 실패: ${error.message}` : "이메일로 로그인 링크를 보냈습니다.");
   }
 
-  if (hasClient && (!authReady || !isAuthenticated)) return <main className="auth-shell"><section className="auth-card"><div className="brand-mark">P/L</div><p className="eyebrow">손익 Explorer</p><h1>사내 계정으로 로그인</h1><p className="muted">권한이 부여된 사용자만 손익 데이터와 원본 파일에 접근할 수 있습니다.</p>{authReady && <label><span>회사 이메일</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com" /></label>}{authReady ? <button className="primary-button" type="button" onClick={sendMagicLink}>로그인 링크 받기</button> : <p className="muted">로그인 상태를 확인하는 중입니다…</p>}{authMessage && <p className="upload-message">{authMessage}</p>}</section></main>;
-
   const filterDefinitions = [
     { key: "year" as const, label: "연도", values: filterOptions.years }, { key: "period" as const, label: "기간", values: filterOptions.periods },
     { key: "product" as const, label: "제품", values: filterOptions.products }, { key: "brand" as const, label: "브랜드", values: filterOptions.brands },
@@ -215,7 +214,8 @@ export function PnlWorkspace() {
   ];
 
   return <main className="analysis-app">
-    <header className="analysis-topbar"><div className="analysis-logo">P/L<span>EXPLORER</span></div><nav><button className="topnav-active">손익 분석</button><button>저장 분석</button><button>이용자 지원</button></nav><div className="topbar-actions"><span className={hasClient ? "status-dot live" : "status-dot"} />{hasClient ? "연결됨" : "로컬 미리보기"}{hasClient && <button className="text-button" onClick={() => void configuredClient?.auth.signOut()}>로그아웃</button>}</div></header>
+    <header className="analysis-topbar"><div className="analysis-logo">P/L<span>EXPLORER</span></div><nav><button className="topnav-active">손익 분석</button><button>저장 분석</button><button>이용자 지원</button></nav><div className="topbar-actions"><span className={hasClient && isAuthenticated ? "status-dot live" : "status-dot"} />{hasClient && isAuthenticated ? "연결됨" : "테스트 모드"}{hasClient && !isAuthenticated && <button className="text-button" onClick={() => setShowLogin((current) => !current)}>로그인</button>}{hasClient && isAuthenticated && <button className="text-button" onClick={() => void configuredClient?.auth.signOut()}>로그아웃</button>}</div></header>
+    {hasClient && showLogin && !isAuthenticated && <section className="login-banner"><div><strong>실제 손익 데이터 연결</strong><span>테스트 화면은 로그인 없이 볼 수 있습니다. 데이터 조회·RAW 업로드·개인 설정 저장은 로그인 뒤 사용할 수 있습니다.</span></div><label><span>회사 이메일</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com" /></label>{authReady ? <button className="primary-button" type="button" onClick={sendMagicLink}>로그인 링크 받기</button> : <span className="login-pending">로그인 상태 확인 중…</span>}<button className="login-close" type="button" onClick={() => setShowLogin(false)} aria-label="로그인 영역 닫기">×</button>{authMessage && <p>{authMessage}</p>}</section>}
     <div className="analysis-shell">
       <aside className="field-palette"><h1>손익 분석</h1><p>항목을 선택한 뒤 행 또는 열에 추가하세요.</p><div className="preset-strip"><span>기본 설정</span>{systemPresets.map((preset) => <button key={preset.id} className={activePreset?.id === preset.id ? "preset active" : "preset"} onClick={() => applyPreset(preset)}>{preset.name}</button>)}</div><input className="palette-search" value={paletteSearch} onChange={(event) => setPaletteSearch(event.target.value)} placeholder="항목 검색" />
         <div className="field-grid">{palette.map((item) => <div className="field-option" key={item}><button onClick={() => addToAxis(item)} aria-describedby={`examples-${item}`}><i>⋮⋮</i>{item}</button><div className="field-tooltip" id={`examples-${item}`} role="tooltip"><small>예시 값 · 25% / 50% / 75% 구간</small>{(fieldExamples[item] ?? initialFieldExamples[item]).map((example) => <span key={example}>{example}</span>)}</div></div>)}</div>
