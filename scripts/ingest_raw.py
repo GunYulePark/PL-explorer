@@ -119,7 +119,14 @@ def read_source(path: Path) -> tuple[list[Any], list[tuple[Any, ...]]]:
     return headers, list(iterator)
 
 
-def normalize(path: Path, year: int, quarter: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+def source_year(value: Any) -> int | None:
+    if isinstance(value, (int, float)) and 2000 <= int(value) <= 2100:
+        return int(value)
+    match = re.search(r"(?:19|20)\d{2}", str(value or ""))
+    return int(match.group()) if match else None
+
+
+def normalize(path: Path, default_year: int | None = None, default_quarter: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     headers, rows = read_source(path)
     if len(headers) < 129:
         raise ValueError(f"RAW 열 수가 예상보다 적습니다: {len(headers)}개")
@@ -153,8 +160,8 @@ def normalize(path: Path, year: int, quarter: str) -> tuple[list[dict[str, Any]]
                 continue
             facts.append({
                 "source_row_number": source_row_number,
-                "fiscal_year": year,
-                "fiscal_quarter": quarter,
+                "fiscal_year": source_year(dimensions["source_year"]) or default_year,
+                "fiscal_quarter": default_quarter,
                 "material_type_code": dimensions["material_type_code"],
                 "material_type_name": dimensions["material_type_name"],
                 "product_hierarchy_code": dimensions["product_hierarchy_code"],
@@ -191,6 +198,7 @@ def normalize(path: Path, year: int, quarter: str) -> tuple[list[dict[str, Any]]
     ]
     report = {
         "source_file": path.name,
+        "dataset_name": path.stem,
         "source_rows": len(rows),
         "valid_rows": len(rows) - len(invalid_rows),
         "invalid_rows": len(invalid_rows),
@@ -266,8 +274,8 @@ def write_to_supabase(accounts: list[dict[str, Any]], facts: list[dict[str, Any]
 def main() -> int:
     parser = argparse.ArgumentParser(description="손익 RAW Excel 정규화 및 Supabase 적재")
     parser.add_argument("--file", required=True, type=Path)
-    parser.add_argument("--year", required=True, type=int)
-    parser.add_argument("--quarter", required=True, choices=["Q1", "Q2", "Q3", "Q4"])
+    parser.add_argument("--year", type=int, help="원본에 연도 값이 없을 때만 사용할 선택 값")
+    parser.add_argument("--quarter", choices=["Q1", "Q2", "Q3", "Q4"], help="원본에 분기 값이 없을 때만 사용할 선택 값")
     parser.add_argument("--batch-id", help="Supabase import_batches ID. --write에서 필수")
     parser.add_argument("--write", action="store_true", help="Supabase에 실제 적재")
     parser.add_argument("--report", type=Path, help="검증 결과 JSON 저장 경로")

@@ -15,6 +15,7 @@ create unique index analysis_presets_system_name_idx on public.analysis_presets 
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
+set search_path = ''
 as $$
 begin
   new.updated_at = now();
@@ -47,5 +48,5 @@ using (owner_id = auth.uid() and not is_system_default);
 
 create policy "admins manage all presets"
 on public.analysis_presets for all to authenticated
-using (public.is_pnl_admin())
-with check (public.is_pnl_admin());
+using ((select private.is_pnl_admin()))
+with check ((select private.is_pnl_admin()));

@@ -7,11 +7,14 @@ create table public.profiles (
   created_at timestamptz not null default now()
 );
 
-create or replace function public.handle_new_user()
+create schema if not exists private;
+revoke all on schema private from public;
+
+create or replace function private.handle_new_user()
 returns trigger
 language plpgsql
 security definer
-set search_path = public
+set search_path = ''
 as $$
 begin
   insert into public.profiles (id, email)
@@ -23,14 +26,14 @@ $$;
 
 create trigger on_auth_user_created
   after insert on auth.users
-  for each row execute procedure public.handle_new_user();
+  for each row execute procedure private.handle_new_user();
 
-create or replace function public.is_pnl_admin()
+create or replace function private.is_pnl_admin()
 returns boolean
 language sql
 stable
 security definer
-set search_path = public
+set search_path = ''
 as $$
   select exists (
     select 1 from public.profiles
@@ -38,12 +41,18 @@ as $$
   );
 $$;
 
+revoke execute on function private.handle_new_user() from public, anon, authenticated;
+revoke execute on function private.is_pnl_admin() from public, anon;
+grant usage on schema private to authenticated;
+grant execute on function private.is_pnl_admin() to authenticated;
+
 create table public.import_batches (
   id uuid primary key default gen_random_uuid(),
   source_filename text not null,
+  dataset_name text not null,
   source_storage_path text not null unique,
-  fiscal_year integer not null check (fiscal_year between 2000 and 2100),
-  fiscal_quarter text not null check (fiscal_quarter in ('Q1', 'Q2', 'Q3', 'Q4')),
+  fiscal_year integer check (fiscal_year between 2000 and 2100),
+  fiscal_quarter text check (fiscal_quarter in ('Q1', 'Q2', 'Q3', 'Q4')),
   uploaded_at timestamptz not null default now(),
   uploaded_by uuid default auth.uid() references auth.users(id),
   processed_at timestamptz,
@@ -70,8 +79,8 @@ create table public.pl_facts (
   id uuid primary key default gen_random_uuid(),
   import_batch_id uuid not null references public.import_batches(id) on delete cascade,
   source_row_number integer not null,
-  fiscal_year integer not null,
-  fiscal_quarter text not null check (fiscal_quarter in ('Q1', 'Q2', 'Q3', 'Q4')),
+  fiscal_year integer,
+  fiscal_quarter text check (fiscal_quarter in ('Q1', 'Q2', 'Q3', 'Q4')),
   material_type_code text,
   material_type_name text,
   product_hierarchy_code text,
@@ -98,6 +107,7 @@ create table public.pl_facts (
 create index pl_facts_period_account_idx on public.pl_facts (fiscal_year, fiscal_quarter, account_code);
 create index pl_facts_product_period_idx on public.pl_facts (product_name, brand, fiscal_year, fiscal_quarter);
 create index pl_facts_customer_period_idx on public.pl_facts (customer_group_name, site_name, fiscal_year, fiscal_quarter);
+create index import_batches_dataset_name_idx on public.import_batches (dataset_name, uploaded_at desc);
 
 alter table public.profiles enable row level security;
 alter table public.import_batches enable row level security;
@@ -106,18 +116,25 @@ alter table public.pl_facts enable row level security;
 
 create policy "profiles read own" on public.profiles for select to authenticated using (id = auth.uid());
 create policy "profiles update own" on public.profiles for update to authenticated using (id = auth.uid()) with check (id = auth.uid());
-create policy "admins manage profiles" on public.profiles for all to authenticated using (public.is_pnl_admin()) with check (public.is_pnl_admin());
+create policy "admins manage profiles" on public.profiles for all to authenticated using ((select private.is_pnl_admin())) with check ((select private.is_pnl_admin()));
 create policy "authenticated read batches" on public.import_batches for select to authenticated using (true);
-create policy "admins manage batches" on public.import_batches for all to authenticated using (public.is_pnl_admin()) with check (public.is_pnl_admin());
+create policy "authenticated create own batches" on public.import_batches for insert to authenticated with check (uploaded_by = (select auth.uid()));
+create policy "anonymous create demo batches" on public.import_batches for insert to anon with check (uploaded_by is null and source_storage_path like 'raw/public/%');
+create policy "admins manage batches" on public.import_batches for all to authenticated using ((select private.is_pnl_admin())) with check ((select private.is_pnl_admin()));
 create policy "authenticated read accounts" on public.pl_accounts for select to authenticated using (true);
-create policy "admins manage accounts" on public.pl_accounts for all to authenticated using (public.is_pnl_admin()) with check (public.is_pnl_admin());
+create policy "admins manage accounts" on public.pl_accounts for all to authenticated using ((select private.is_pnl_admin())) with check ((select private.is_pnl_admin()));
 create policy "authenticated read facts" on public.pl_facts for select to authenticated using (true);
-create policy "admins manage facts" on public.pl_facts for all to authenticated using (public.is_pnl_admin()) with check (public.is_pnl_admin());
+create policy "admins manage facts" on public.pl_facts for all to authenticated using ((select private.is_pnl_admin())) with check ((select private.is_pnl_admin()));
 
 insert into storage.buckets (id, name, public)
 values ('raw-data', 'raw-data', false)
 on conflict (id) do nothing;
 
-create policy "admins read raw data" on storage.objects for select to authenticated using (bucket_id = 'raw-data' and public.is_pnl_admin());
-create policy "admins upload raw data" on storage.objects for insert to authenticated with check (bucket_id = 'raw-data' and public.is_pnl_admin());
-create policy "admins delete raw data" on storage.objects for delete to authenticated using (bucket_id = 'raw-data' and public.is_pnl_admin());
+create policy "admins read raw data" on storage.objects for select to authenticated using (bucket_id = 'raw-data' and (select private.is_pnl_admin()));
+create policy "admins upload raw data" on storage.objects for insert to authenticated with check (bucket_id = 'raw-data' and (select private.is_pnl_admin()));
+create policy "admins delete raw data" on storage.objects for delete to authenticated using (bucket_id = 'raw-data' and (select private.is_pnl_admin()));
+create policy "users read own raw data" on storage.objects for select to authenticated using (bucket_id = 'raw-data' and (storage.foldername(name))[1] = 'raw' and (storage.foldername(name))[2] = (select auth.uid()::text));
+create policy "users upload own raw data" on storage.objects for insert to authenticated with check (bucket_id = 'raw-data' and (storage.foldername(name))[1] = 'raw' and (storage.foldername(name))[2] = (select auth.uid()::text));
+create policy "users delete own raw data" on storage.objects for delete to authenticated using (bucket_id = 'raw-data' and (storage.foldername(name))[1] = 'raw' and (storage.foldername(name))[2] = (select auth.uid()::text));
+create policy "anonymous upload demo raw data" on storage.objects for insert to anon with check (bucket_id = 'raw-data' and (storage.foldername(name))[1] = 'raw' and (storage.foldername(name))[2] = 'public' and storage.extension(name) = 'xlsx');
+create policy "anonymous read demo upload response" on storage.objects for select to anon using (bucket_id = 'raw-data' and (storage.foldername(name))[1] = 'raw' and (storage.foldername(name))[2] = 'public' and storage.allow_only_operation('storage.object.upload'));

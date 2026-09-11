@@ -7,7 +7,7 @@
 - 한국어 손익 조회 화면과 CSV 다운로드
 - U-BIST형 분석 설계 화면: 항목 팔레트, 행·열 구성, 행/열 교환, 선택 항목 정렬
 - 기본 분석 설정 3종과 사용자별 분석 설정 저장
-- Supabase Auth/RLS를 전제로 한 조회 및 관리자 업로드 권한
+- 로그인 없이 체험 가능한 RAW 업로드와 RLS 기반 관리자 운영 권한
 - Supabase Storage의 `raw-data` 버킷에 원본 Excel 보관
 - Python 적재기의 RAW 검증, 넓은 형태(wide) RAW를 계정별 long-format으로 정규화
 - 매출총이익 및 영업이익 정합성 검증 결과를 `import_batches`에 기록
@@ -28,8 +28,7 @@ Supabase 값을 아직 넣지 않아도 화면 구조는 열리지만, 소스 RA
 2. SQL Editor에서 `supabase/migrations/0001_pnl_schema.sql`을 실행합니다.
 3. SQL Editor에서 `supabase/migrations/0002_analysis_presets.sql`을 실행합니다.
 4. SQL Editor에서 `supabase/seed.sql`을 실행합니다.
-5. Auth에서 이메일 사용자를 생성하거나 로그인합니다.
-6. 최초 관리자는 SQL Editor에서 아래처럼 지정합니다.
+5. 공개 체험 업로드는 별도 로그인 없이 사용할 수 있습니다. 운영 관리자 권한이 필요할 때만 Auth 사용자를 만든 뒤 SQL Editor에서 아래처럼 지정합니다.
 
 ```sql
 update public.profiles
@@ -41,15 +40,13 @@ where email = 'admin@company.com';
 
 ## RAW 업로드 및 적재
 
-1. 관리자 계정으로 로그인한 뒤 화면의 **RAW 업로드**에서 xlsx 파일, 연도, 분기를 선택합니다.
-2. 파일은 `raw-data` 버킷에 저장되고 `import_batches`의 상태가 `uploaded`가 됩니다.
+1. 화면의 **RAW 업로드**에서 xlsx 파일만 선택합니다. 로그인 없이 체험할 수 있고, 파일명(확장자 제외)이 데이터베이스 이름으로 기록됩니다.
+2. 공개 체험 업로드는 `raw-data/raw/public` 경로에 저장되며, 업로드·업로드 응답에만 허용됩니다. 기존 RAW 파일의 목록·다운로드는 공개하지 않습니다.
 3. 처리 PC, Azure Functions, 또는 CI에서 아래 Python 명령을 실행합니다.
 
 ```powershell
 python scripts/ingest_raw.py `
   --file "C:\Users\CKD\Downloads\RAWDATA_MOCK_SAMPLE.xlsx" `
-  --year 2023 `
-  --quarter Q1 `
   --batch-id "import_batches UUID" `
   --write
 ```
@@ -59,8 +56,6 @@ python scripts/ingest_raw.py `
 ```powershell
 python scripts/ingest_raw.py `
   --file "C:\Users\CKD\Downloads\RAWDATA_MOCK_SAMPLE.xlsx" `
-  --year 2023 `
-  --quarter Q1 `
   --report outputs\raw-validation.json
 ```
 
@@ -69,7 +64,7 @@ python scripts/ingest_raw.py `
 - `pl_facts`는 `기간 + 조회 차원 + account_code + amount` 형식입니다.
 - 합계 계정과 세부 계정을 모두 적재하지만, 기본 손익표는 `sales`, `cogs`, `gross_profit`, `sga`, `rnd`, `operating_profit` 계정만 각각 조회합니다. 상위/하위 계정을 한 SQL 합계에 섞지 않으므로 이중 집계가 나지 않습니다.
 - Python 적재기는 세부 비용 열을 자동으로 계정 맵에 추가하며, 원본 열 순서를 고유 키로 사용합니다. 중복된 `내역` 열은 위치에 따라 자재유형명·제품계층명·고객그룹명·사업장명으로 정규화합니다.
-- 현재 제공 샘플의 분기 값은 파일 안에 없으므로, 업로드 시 지정한 `--year`, `--quarter`가 조회 기준이 됩니다.
+- 원본의 첫 번째 열에서 연도를 자동 인식합니다. 분기 값이 없는 원본은 분기 없이 적재하며, 필요한 경우에만 Python 적재기의 선택 옵션 `--year`, `--quarter`로 보완할 수 있습니다.
 
 ## 분석 설정
 
@@ -77,7 +72,7 @@ python scripts/ingest_raw.py `
 - 화면 좌측 항목을 선택하면 활성화된 행 또는 열에 추가됩니다. `행/열 바꾸기`로 두 축을 즉시 교환할 수 있습니다.
 - 우측 패널에서 행·열 항목의 순서를 바꾸거나 삭제할 수 있습니다.
 - 행·열 칩을 끌어놓아 같은 축 안에서 순서를 바꾸거나 행과 열 사이를 이동할 수 있습니다.
-- `내 분석 저장`은 로그인한 사용자에게만 보이는 Supabase `analysis_presets` 테이블에 현재 행·열·필터 구성을 저장합니다. 브라우저 저장소에는 분석 설정을 보관하지 않습니다.
+- 화면은 색상으로 구분한 세 가지 기본 프리셋을 우선 제공하며, 프리셋을 선택한 뒤 필요한 필터·행·열만 조정합니다.
 
 ## GitHub Pages 배포
 
@@ -93,10 +88,8 @@ python scripts/ingest_raw.py `
 
 ### Supabase에서 추가로 설정할 항목
 
-- **Authentication → URL Configuration**의 Site URL을 `https://gunyulepark.github.io/PL-explorer/`로 지정합니다.
-- Redirect URLs에 `https://gunyulepark.github.io/PL-explorer/`와 개발용 `http://localhost:3000/`를 추가합니다.
 - SQL Editor에서 위의 `0001_pnl_schema.sql`, `0002_analysis_presets.sql`, `seed.sql`을 순서대로 실행합니다.
-- 첫 관리자 로그인 뒤 `profiles`에서 해당 이메일의 `role`을 `admin`으로 변경합니다.
+- 관리자 운영이 필요한 경우에만 Auth 사용자 생성 뒤 `profiles`에서 해당 이메일의 `role`을 `admin`으로 변경합니다.
 
 ## RAW 샘플 검증 기준
 
