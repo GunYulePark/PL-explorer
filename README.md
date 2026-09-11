@@ -8,8 +8,8 @@
 - U-BIST형 분석 설계 화면: 항목 팔레트, 행·열 구성, 행/열 교환, 선택 항목 정렬
 - 기본 분석 설정 3종과 사용자별 분석 설정 저장
 - 로그인 없이 체험 가능한 RAW 업로드와 RLS 기반 관리자 운영 권한
-- Supabase Storage의 `raw-data` 버킷에 원본 Excel 보관
-- Python 적재기의 RAW 검증, 넓은 형태(wide) RAW를 계정별 long-format으로 정규화
+- Supabase Storage의 `raw-data` 버킷에 원본 XLSX/CSV 보관
+- GitHub Actions Python 적재기의 RAW 검증, 넓은 형태(wide) RAW를 계정별 long-format으로 정규화
 - 매출총이익 및 영업이익 정합성 검증 결과를 `import_batches`에 기록
 
 ## 빠른 시작
@@ -38,11 +38,26 @@ where email = 'admin@company.com';
 
 브라우저에는 publishable key만 둡니다. `SUPABASE_SECRET_KEY`는 Python 적재를 실행하는 안전한 환경에만 두고, 절대 `NEXT_PUBLIC_` 변수나 클라이언트 코드에 넣지 않습니다.
 
+### 대용량 자동 적재 워커
+
+Edge Function은 큰 XLSX 처리 시 메모리/CPU 한도에 걸릴 수 있으므로, `0005_github_actions_raw_ingest.sql`은 Edge 트리거를 끄고 GitHub Actions의 Python 워커를 사용합니다. 브라우저는 원본 파일을 Storage에 저장하고 배치만 만들며, 원본 다운로드와 `pl_facts` 쓰기는 워커만 수행합니다.
+
+GitHub 저장소 **Settings → Secrets and variables → Actions**에서 아래 두 Repository secret을 추가합니다. 이들은 `ingest-raw.yml` 워크플로에서만 쓰이며 GitHub Pages 빌드에는 전달되지 않습니다.
+
+- `SUPABASE_URL`: `https://zyagwjbntxtihppagtkk.supabase.co`
+- `SUPABASE_SECRET_KEY`: 이 적재 전용으로 새로 만든 Supabase `sb_secret_...` 키
+
+`SUPABASE_SECRET_KEY`는 업로드 파일을 읽고 DB에 쓰는 서버 권한이므로 `NEXT_PUBLIC_` 변수, 저장소 파일, 채팅에 넣으면 안 됩니다. 전용 키는 이름을 `pnl-ingest-worker`처럼 구분해 두고, 필요 없어지면 Supabase **Settings → API Keys**에서 폐기/교체합니다.
+
+기존 `PNL_INGEST_WEBHOOK_TOKEN` Vault/Edge Function secret은 이 워커 경로에서는 더 이상 사용하지 않습니다. GitHub 워커가 한 번 정상 완료된 뒤 Vault와 Edge Function Secrets에서 제거해도 됩니다.
+
 ## RAW 업로드 및 적재
 
-1. 화면의 **RAW 업로드**에서 xlsx 파일만 선택합니다. 로그인 없이 체험할 수 있고, 파일명(확장자 제외)이 데이터베이스 이름으로 기록됩니다.
-2. 공개 체험 업로드는 `raw-data/raw/public` 경로에 저장되며, 업로드·업로드 응답에만 허용됩니다. 기존 RAW 파일의 목록·다운로드는 공개하지 않습니다.
-3. 처리 PC, Azure Functions, 또는 CI에서 아래 Python 명령을 실행합니다.
+1. 화면의 **RAW 업로드**에서 XLSX 또는 CSV 원본을 선택합니다. 로그인 없이 체험할 수 있고, 파일명(확장자 제외)이 데이터베이스 이름으로 기록됩니다.
+2. 공개 체험 업로드는 `raw-data/raw/public` 경로에 저장되며, 파일당 20MB까지 허용됩니다. 업로드·업로드 응답에만 허용되고 기존 RAW 파일의 목록·다운로드는 공개하지 않습니다.
+3. `Ingest uploaded RAW files` GitHub Actions가 5분마다 `uploaded` 배치를 받아 원본을 비공개로 내려받아 검증·적재합니다. 수동 실행도 Actions 탭에서 가능합니다.
+
+로컬에서 수동 처리하려면 아래처럼 실행합니다.
 
 ```powershell
 python scripts/ingest_raw.py `
@@ -84,7 +99,7 @@ python scripts/ingest_raw.py `
    - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`: Supabase publishable key (`sb_publishable_...`)
 3. Actions의 `Deploy GitHub Pages` 실행이 끝나면 `https://gunyulepark.github.io/PL-explorer/`에서 조회합니다.
 
-두 값은 브라우저 앱에 포함되는 공개 연결 정보입니다. `SUPABASE_SECRET_KEY`는 절대 GitHub Actions secret이나 Pages 환경변수로도 넣지 말고, Python 적재 전용 서버 환경에만 둡니다. 기존 `NEXT_PUBLIC_SUPABASE_ANON_KEY`도 배포 호환성을 위해 읽을 수 있지만 새로 만들 필요는 없습니다.
+두 `NEXT_PUBLIC_` 값은 브라우저 앱에 포함되는 공개 연결 정보입니다. 반대로 `SUPABASE_SECRET_KEY`는 **GitHub Pages 배포 워크플로에는 넣지 않고**, RAW 적재 전용 `Ingest uploaded RAW files` 워크플로의 Repository secret으로만 등록합니다. 기존 `NEXT_PUBLIC_SUPABASE_ANON_KEY`도 배포 호환성을 위해 읽을 수 있지만 새로 만들 필요는 없습니다.
 
 ### Supabase에서 추가로 설정할 항목
 
@@ -102,5 +117,5 @@ python scripts/ingest_raw.py `
 
 - 조회 권한을 사업장/조직 단위까지 제한하는 `profile_scopes` 테이블 추가
 - `pl_accounts`의 세부계정 표시 순서와 부모 계정을 재무팀 기준으로 확정
-- Azure Functions 또는 CI에서 `uploaded` 배치를 감지해 Python 적재기를 무인 실행
+- 워커 전용 Supabase Secret key의 정기 교체
 - 대용량 데이터에서는 필터 값용 차원 테이블 또는 materialized view 추가

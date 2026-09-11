@@ -7,6 +7,7 @@ import_batches record and setting SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import quote
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -68,7 +70,14 @@ class Account:
 
 
 def number(value: Any) -> float:
-    return float(value) if isinstance(value, (int, float)) else 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip().replace(",", "")) if value.strip() else 0.0
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 def slug(value: str) -> str:
@@ -112,11 +121,26 @@ def build_accounts(headers: list[Any]) -> tuple[list[Account], list[str]]:
 
 
 def read_source(path: Path) -> tuple[list[Any], list[tuple[Any, ...]]]:
+    if path.suffix.lower() == ".csv":
+        last_error: UnicodeDecodeError | None = None
+        for encoding in ("utf-8-sig", "cp949", "euc-kr"):
+            try:
+                with path.open("r", encoding=encoding, newline="") as source:
+                    reader = csv.reader(source)
+                    headers = next(reader)
+                    return headers, [tuple(row) for row in reader]
+            except UnicodeDecodeError as error:
+                last_error = error
+        raise ValueError("CSV 인코딩을 읽을 수 없습니다. UTF-8 또는 CP949 CSV를 사용하세요.") from last_error
     workbook = load_workbook(path, read_only=True, data_only=True)
     sheet = workbook.active
     iterator = sheet.values
     headers = list(next(iterator))
     return headers, list(iterator)
+
+
+def value_at(row: tuple[Any, ...], index: int) -> Any:
+    return row[index] if index < len(row) else None
 
 
 def source_year(value: Any) -> int | None:
@@ -138,24 +162,24 @@ def normalize(path: Path, default_year: int | None = None, default_quarter: str 
     account_by_position = {account.source_position - 1: account for account in accounts}
 
     for source_row_number, row in enumerate(rows, start=2):
-        dimensions = {target: row[index] for index, target in DIMENSION_COLUMNS.items()}
+        dimensions = {target: value_at(row, index) for index, target in DIMENSION_COLUMNS.items()}
         if not dimensions["product_name"] and not dimensions["site_name"]:
             invalid_rows.append(source_row_number)
             continue
 
-        sales = number(row[24])
-        cogs = number(row[31])
-        gross_profit = number(row[42])
-        sga = number(row[43])
-        rnd = number(row[120])
-        operating_profit = number(row[128])
+        sales = number(value_at(row, 24))
+        cogs = number(value_at(row, 31))
+        gross_profit = number(value_at(row, 42))
+        sga = number(value_at(row, 43))
+        rnd = number(value_at(row, 120))
+        operating_profit = number(value_at(row, 128))
         if round(sales - cogs - gross_profit, 2) != 0:
             gross_mismatch += 1
         if round(gross_profit - sga - rnd - operating_profit, 2) != 0:
             operating_mismatch += 1
 
         for source_index, account in account_by_position.items():
-            amount = number(row[source_index])
+            amount = number(value_at(row, source_index))
             if amount == 0:
                 continue
             facts.append({
@@ -209,9 +233,9 @@ def normalize(path: Path, default_year: int | None = None, default_quarter: str 
         "gross_profit_mismatch_rows": gross_mismatch,
         "operating_profit_mismatch_rows": operating_mismatch,
         "dimension_distinct_counts": {
-            "product": len({row[7] for row in rows if row[7]}),
-            "brand": len({row[8] for row in rows if row[8]}),
-            "business_site": len({row[18] for row in rows if row[18]}),
+            "product": len({value_at(row, 7) for row in rows if value_at(row, 7)}),
+            "brand": len({value_at(row, 8) for row in rows if value_at(row, 8)}),
+            "business_site": len({value_at(row, 18) for row in rows if value_at(row, 18)}),
         },
     }
     return account_rows, facts, report
@@ -229,26 +253,42 @@ def request_json(url: str, method: str, headers: dict[str, str], payload: Any | 
         raise RuntimeError(f"Supabase API 오류 ({error.code}): {detail}") from error
 
 
+def request_bytes(url: str, headers: dict[str, str]) -> bytes:
+    request = Request(url, method="GET", headers=headers)
+    try:
+        with urlopen(request) as response:
+            return response.read()
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase Storage 오류 ({error.code}): {detail}") from error
+
+
+def supabase_settings() -> tuple[str, dict[str, str]]:
+    base_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    service_key = os.environ.get("SUPABASE_SECRET_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not base_url or not service_key:
+        raise RuntimeError("SUPABASE_URL 및 SUPABASE_SECRET_KEY가 필요합니다.")
+    headers = {"apikey": service_key, "Content-Type": "application/json"}
+    if not service_key.startswith("sb_secret_"):
+        headers["Authorization"] = f"Bearer {service_key}"
+    return base_url, headers
+
+
 def chunks(values: list[dict[str, Any]], size: int = 500) -> Iterable[list[dict[str, Any]]]:
     for index in range(0, len(values), size):
         yield values[index : index + size]
 
 
 def write_to_supabase(accounts: list[dict[str, Any]], facts: list[dict[str, Any]], report: dict[str, Any], batch_id: str) -> None:
-    base_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
-    service_key = os.environ.get("SUPABASE_SECRET_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-    if not base_url or not service_key:
-        raise RuntimeError("SUPABASE_URL 및 SUPABASE_SECRET_KEY가 필요합니다.")
-
-    headers = {
-        "apikey": service_key,
-        "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates,return=minimal",
-    }
-    # New sb_secret keys must be sent only as an API key; the legacy JWT key
-    # still uses the Authorization header for compatibility.
-    if not service_key.startswith("sb_secret_"):
-        headers["Authorization"] = f"Bearer {service_key}"
+    base_url, api_headers = supabase_settings()
+    headers = {**api_headers, "Prefer": "resolution=merge-duplicates,return=minimal"}
+    # A failed run can have written only some fact chunks. Clear that batch
+    # before retrying so a later worker run cannot double-count it.
+    request_json(
+        f"{base_url}/rest/v1/pl_facts?import_batch_id=eq.{quote(batch_id)}",
+        "DELETE",
+        {**api_headers, "Prefer": "return=minimal"},
+    )
     request_json(f"{base_url}/rest/v1/pl_accounts?on_conflict=account_code", "POST", headers, accounts)
     for batch in chunks(facts):
         for record in batch:
@@ -271,16 +311,93 @@ def write_to_supabase(accounts: list[dict[str, Any]], facts: list[dict[str, Any]
     )
 
 
+def mark_batch_failed(batch_id: str, error: Exception) -> None:
+    base_url, headers = supabase_settings()
+    request_json(
+        f"{base_url}/rest/v1/import_batches?id=eq.{quote(batch_id)}",
+        "PATCH",
+        {**headers, "Prefer": "return=minimal"},
+        {
+            "status": "failed",
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "validation_result": {"error": str(error)[:1000]},
+        },
+    )
+
+
+def process_pending_batches(limit: int) -> int:
+    """Claim uploaded RAW files, download them privately, and write normalized facts."""
+    base_url, headers = supabase_settings()
+    query = "status=eq.uploaded&select=id,source_filename,source_storage_path&order=uploaded_at.asc&limit=" + str(limit)
+    candidates = request_json(f"{base_url}/rest/v1/import_batches?{query}", "GET", headers) or []
+    processed = 0
+    for candidate in candidates:
+        batch_id = str(candidate["id"])
+        source_path = str(candidate.get("source_storage_path") or "")
+        source_name = str(candidate.get("source_filename") or "source.xlsx")
+        if Path(source_name).suffix.lower() not in {".xlsx", ".csv"}:
+            error = ValueError("XLSX 또는 CSV RAW 파일만 적재할 수 있습니다.")
+            mark_batch_failed(batch_id, error)
+            print(f"실패 {batch_id}: {error}")
+            continue
+
+        claimed = request_json(
+            f"{base_url}/rest/v1/import_batches?id=eq.{quote(batch_id)}&status=eq.uploaded",
+            "PATCH",
+            {**headers, "Prefer": "return=representation"},
+            {"status": "processing"},
+        )
+        if not claimed:
+            continue
+
+        temporary_path = Path.cwd() / ".tmp-ingest" / f"{batch_id}{Path(source_name).suffix.lower()}"
+        try:
+            temporary_path.parent.mkdir(exist_ok=True)
+            raw = request_bytes(
+                f"{base_url}/storage/v1/object/raw-data/{quote(source_path, safe='/')}",
+                headers,
+            )
+            temporary_path.write_bytes(raw)
+            accounts, facts, report = normalize(temporary_path)
+            report["source_file"] = source_name
+            report["dataset_name"] = Path(source_name).stem
+            write_to_supabase(accounts, facts, report, batch_id)
+            processed += 1
+            print(f"완료 {batch_id}: {source_name} ({report['fact_rows']} facts)")
+        except Exception as error:
+            try:
+                mark_batch_failed(batch_id, error)
+            except Exception as status_error:
+                print(f"상태 기록 실패 {batch_id}: {status_error}", file=sys.stderr)
+            print(f"실패 {batch_id}: {error}", file=sys.stderr)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    return processed
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="손익 RAW Excel 정규화 및 Supabase 적재")
-    parser.add_argument("--file", required=True, type=Path)
+    parser = argparse.ArgumentParser(description="손익 RAW XLSX/CSV 정규화 및 Supabase 적재")
+    parser.add_argument("--file", type=Path)
     parser.add_argument("--year", type=int, help="원본에 연도 값이 없을 때만 사용할 선택 값")
     parser.add_argument("--quarter", choices=["Q1", "Q2", "Q3", "Q4"], help="원본에 분기 값이 없을 때만 사용할 선택 값")
     parser.add_argument("--batch-id", help="Supabase import_batches ID. --write에서 필수")
     parser.add_argument("--write", action="store_true", help="Supabase에 실제 적재")
     parser.add_argument("--report", type=Path, help="검증 결과 JSON 저장 경로")
+    parser.add_argument("--process-pending", action="store_true", help="업로드 대기 배치를 Supabase Storage에서 받아 적재")
+    parser.add_argument("--limit", type=int, default=3, help="한 실행에서 처리할 최대 대기 배치 수")
     args = parser.parse_args()
 
+    if args.process_pending:
+        if args.file or args.write or args.batch_id:
+            parser.error("--process-pending은 --file, --write, --batch-id와 함께 사용할 수 없습니다.")
+        if args.limit < 1 or args.limit > 20:
+            parser.error("--limit은 1~20 사이여야 합니다.")
+        processed = process_pending_batches(args.limit)
+        print(f"대기 배치 처리 완료: {processed}개")
+        return 0
+
+    if not args.file:
+        parser.error("--file 또는 --process-pending이 필요합니다.")
     if not args.file.exists():
         raise FileNotFoundError(args.file)
     if args.write and not args.batch_id:
