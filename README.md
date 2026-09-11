@@ -24,7 +24,7 @@ Supabase 값을 아직 넣지 않아도 화면 구조는 열리지만, 소스 RA
 
 ## Supabase 설정
 
-1. Supabase에서 새 프로젝트를 만들고 `.env.local`에 `NEXT_PUBLIC_SUPABASE_URL`과 `NEXT_PUBLIC_SUPABASE_ANON_KEY`를 입력합니다.
+1. Supabase에서 새 프로젝트를 만들고 `.env.local`에 `NEXT_PUBLIC_SUPABASE_URL`과 `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`를 입력합니다.
 2. SQL Editor에서 `supabase/migrations/0001_pnl_schema.sql`을 실행합니다.
 3. SQL Editor에서 `supabase/migrations/0002_analysis_presets.sql`을 실행합니다.
 4. SQL Editor에서 `supabase/seed.sql`을 실행합니다.
@@ -37,7 +37,7 @@ set role = 'admin'
 where email = 'admin@company.com';
 ```
 
-브라우저에는 anon key만 둡니다. `SUPABASE_SERVICE_ROLE_KEY`는 Python 적재를 실행하는 안전한 환경에만 두고, 절대 `NEXT_PUBLIC_` 변수나 클라이언트 코드에 넣지 않습니다.
+브라우저에는 publishable key만 둡니다. `SUPABASE_SECRET_KEY`는 Python 적재를 실행하는 안전한 환경에만 두고, 절대 `NEXT_PUBLIC_` 변수나 클라이언트 코드에 넣지 않습니다.
 
 ## RAW 업로드 및 적재
 
@@ -86,10 +86,10 @@ python scripts/ingest_raw.py `
 1. GitHub 저장소 **Settings → Pages**에서 Source를 **GitHub Actions**로 선택합니다.
 2. 저장소 **Settings → Secrets and variables → Actions**에 아래 Repository secrets 두 개를 추가합니다.
    - `NEXT_PUBLIC_SUPABASE_URL`: Supabase Project URL
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: Supabase anon public key
+   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`: Supabase publishable key (`sb_publishable_...`)
 3. Actions의 `Deploy GitHub Pages` 실행이 끝나면 `https://gunyulepark.github.io/PL-explorer/`에서 조회합니다.
 
-두 값은 브라우저 앱에 포함되는 공개 연결 정보입니다. `SUPABASE_SERVICE_ROLE_KEY`는 절대 GitHub Actions secret이나 Pages 환경변수로도 넣지 말고, Python 적재 전용 서버 환경에만 둡니다.
+두 값은 브라우저 앱에 포함되는 공개 연결 정보입니다. `SUPABASE_SECRET_KEY`는 절대 GitHub Actions secret이나 Pages 환경변수로도 넣지 말고, Python 적재 전용 서버 환경에만 둡니다. 기존 `NEXT_PUBLIC_SUPABASE_ANON_KEY`도 배포 호환성을 위해 읽을 수 있지만 새로 만들 필요는 없습니다.
 
 ### Supabase에서 추가로 설정할 항목
 

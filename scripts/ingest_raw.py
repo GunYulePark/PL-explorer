@@ -228,16 +228,19 @@ def chunks(values: list[dict[str, Any]], size: int = 500) -> Iterable[list[dict[
 
 def write_to_supabase(accounts: list[dict[str, Any]], facts: list[dict[str, Any]], report: dict[str, Any], batch_id: str) -> None:
     base_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
-    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    service_key = os.environ.get("SUPABASE_SECRET_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     if not base_url or not service_key:
-        raise RuntimeError("SUPABASE_URL 및 SUPABASE_SERVICE_ROLE_KEY가 필요합니다.")
+        raise RuntimeError("SUPABASE_URL 및 SUPABASE_SECRET_KEY가 필요합니다.")
 
     headers = {
         "apikey": service_key,
-        "Authorization": f"Bearer {service_key}",
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates,return=minimal",
     }
+    # New sb_secret keys must be sent only as an API key; the legacy JWT key
+    # still uses the Authorization header for compatibility.
+    if not service_key.startswith("sb_secret_"):
+        headers["Authorization"] = f"Bearer {service_key}"
     request_json(f"{base_url}/rest/v1/pl_accounts?on_conflict=account_code", "POST", headers, accounts)
     for batch in chunks(facts):
         for record in batch:
