@@ -16,21 +16,19 @@ jobs:
   ingest:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        if: ${{ secrets.SUPABASE_URL != '' && secrets.SUPABASE_SECRET_KEY != '' }}
         with:
           python-version: "3.12"
       - name: Install RAW parser
-        if: ${{ secrets.SUPABASE_URL != '' && secrets.SUPABASE_SECRET_KEY != '' }}
         run: python -m pip install --disable-pip-version-check openpyxl==3.1.5
       - name: Check worker secrets
-        if: ${{ secrets.SUPABASE_URL == '' || secrets.SUPABASE_SECRET_KEY == '' }}
-        run: echo "::warning::Add SUPABASE_URL and SUPABASE_SECRET_KEY Repository secrets before enabling RAW ingestion."
+        run: |
+          test -n "$SUPABASE_URL" || (echo "::error::SUPABASE_URL Repository secret is missing." && exit 1)
+          test -n "$SUPABASE_SECRET_KEY" || (echo "::error::SUPABASE_SECRET_KEY Repository secret is missing." && exit 1)
       - name: Ingest pending RAW batches
-        if: ${{ secrets.SUPABASE_URL != '' && secrets.SUPABASE_SECRET_KEY != '' }}
         run: python scripts/ingest_raw.py --process-pending --limit 3
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
