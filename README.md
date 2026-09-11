@@ -20,7 +20,7 @@ Copy-Item .env.example .env.local
 npm run dev
 ```
 
-Supabase 값을 아직 넣지 않아도 조회 화면은 제공된 `RAWDATA_MOCK_SAMPLE.xlsx`의 2023년 합계를 이용한 로컬 미리보기로 열립니다. 실제 손익 조회 및 RAW 저장은 Supabase를 연결한 후에만 작동합니다.
+Supabase 값을 아직 넣지 않아도 화면 구조는 열리지만, 소스 RAW의 품목·금액·집계값은 브라우저나 GitHub Pages에 포함하지 않습니다. 실제 손익 조회와 RAW 저장은 Supabase를 연결한 후에만 작동합니다.
 
 ## Supabase 설정
 
