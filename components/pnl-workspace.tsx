@@ -120,7 +120,6 @@ export function PnlWorkspace() {
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
-  const fileInput = useRef<HTMLInputElement>(null);
   const yearDragStart = useRef<string | null>(null);
   const suppressYearClick = useRef(false);
   const activeBreakdownDimensions = useMemo(() => breakdownDimensions.filter((dimension) => layout.rows.includes(dimension.label)), [layout.rows]);
@@ -274,18 +273,29 @@ export function PnlWorkspace() {
   function swapAxes() { setLayout((current) => ({ ...current, rows: current.columns, columns: current.rows })); setActiveAxis((current) => current === "rows" ? "columns" : "rows"); }
   function applyPreset(preset: SavedPreset) { setLayout(ensureConfig(preset.config)); setPresetMessage(`‘${preset.name}’ 설정을 적용했습니다.`); }
   async function downloadExcel() {
-    if (!file) { setExportMessage("원본 XLSX 또는 CSV 파일을 선택한 뒤 다시 Excel 내려받기를 누르세요."); fileInput.current?.click(); return; }
+    const exportDatasetId = filters.dataset === "전체" && datasets.length === 1 ? datasets[0].id : filters.dataset;
+    if (!configuredClient || exportDatasetId === "전체") { setExportMessage("RAW 시트는 데이터베이스 한 개를 선택한 뒤 내려받을 수 있습니다."); return; }
     setExporting(true); setExportMessage(null); setUploadMessage(null);
-    const datasetName = filters.dataset === "전체" ? "전체" : datasets.find((dataset) => dataset.id === filters.dataset)?.name ?? "선택 데이터베이스";
+    const datasetName = datasets.find((dataset) => dataset.id === exportDatasetId)?.name ?? "선택 데이터베이스";
     const yearRange = filters.selectedYears.length ? filters.selectedYears.sort().join(", ") : `${filters.yearFrom || "전체"}~${filters.yearTo || "전체"}`;
     try {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      if (!supabaseUrl || !publishableKey) throw new Error("Supabase 연결 정보를 찾을 수 없습니다.");
+      const rawResponse = await fetch(`${supabaseUrl}/functions/v1/pnl-raw-download?dataset=${encodeURIComponent(exportDatasetId)}`, { headers: { Authorization: `Bearer ${publishableKey}`, apikey: publishableKey } });
+      if (!rawResponse.ok) {
+        const problem = await rawResponse.json().catch(() => null) as { error?: string } | null;
+        throw new Error(problem?.error ?? "서버에서 원본 파일을 가져오지 못했습니다.");
+      }
+      const sourceBlob = await rawResponse.blob();
+      const sourceFilename = decodeURIComponent(rawResponse.headers.get("x-source-filename") ?? "RAW.xlsx");
       const ExcelJS = await import("exceljs");
       const workbook = new ExcelJS.Workbook();
       const rawSheet = workbook.addWorksheet("RAW", { views: [{ state: "frozen", ySplit: 1 }] });
-      if (/\.csv$/i.test(file.name)) rawSheet.addRows(parseCsvRows(await file.text()));
+      if (/\.csv$/i.test(sourceFilename)) rawSheet.addRows(parseCsvRows(await sourceBlob.text()));
       else {
         const sourceWorkbook = new ExcelJS.Workbook();
-        await sourceWorkbook.xlsx.load(await file.arrayBuffer());
+        await sourceWorkbook.xlsx.load(await sourceBlob.arrayBuffer());
         const sourceSheet = sourceWorkbook.worksheets[0];
         if (!sourceSheet) throw new Error("원본 XLSX에서 첫 번째 시트를 찾을 수 없습니다.");
         const sourceColumns = Math.max(sourceSheet.actualColumnCount, 1);
@@ -326,7 +336,7 @@ export function PnlWorkspace() {
     } catch (error) { setExportMessage(`Excel 생성 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`); }
     finally { setExporting(false); }
   }
-  function selectFile(event: ChangeEvent<HTMLInputElement>) { setFile(event.target.files?.[0] ?? null); setUploadMessage(null); setExportMessage(null); }
+  function selectFile(event: ChangeEvent<HTMLInputElement>) { setFile(event.target.files?.[0] ?? null); setUploadMessage(null); }
   async function uploadRaw() {
     if (!configuredClient || !file) { setUploadMessage(file ? "Supabase 연결 정보를 설정한 뒤 업로드할 수 있습니다." : "업로드할 XLSX 또는 CSV 파일을 선택하세요."); return; }
     if (!/\.(xlsx|csv)$/i.test(file.name)) { setUploadMessage("XLSX 또는 CSV 파일만 업로드할 수 있습니다."); return; }
@@ -361,7 +371,7 @@ export function PnlWorkspace() {
         <section className="measure-picker"><div className="measure-picker-heading"><div><strong>조회 손익 항목</strong><span>행·열 배치와 별개로 조회할 측정치를 선택합니다.</span></div><button type="button" className="measure-reset" onClick={() => setSelectedMeasures(statementOrder.map((item) => item.code))}>전체 선택</button></div><div className="measure-options">{statementOrder.map(({ code, label }) => <label className={selectedMeasures.includes(code) ? "measure-option checked" : "measure-option"} key={code}><input type="checkbox" checked={selectedMeasures.includes(code)} onChange={() => toggleMeasure(code)} /><span>{label}</span></label>)}</div><p>{selectedMeasures.length ? `${selectedMeasures.length}개 항목 선택됨` : "최소 1개 이상 선택하세요"}</p></section>
         <section className="search-panel"><div><strong>조회 설계</strong><span>행과 열은 비교 기준, 손익 항목은 별도 선택으로 조합합니다.</span></div><button className="detail-search">상세검색</button></section>
         <section className="report-panel"><div className="report-heading"><div><p>미리보기</p><h2>{activePreset?.name ?? "사용자 지정 분석"}</h2></div><div className="report-meta"><span>{layout.rows.join(" · ") || "행 없음"}</span><b>×</b><span>{layout.columns.join(" · ") || "열 없음"}</span></div></div><div className="report-table"><div className="report-row report-header" style={reportGridStyle}><span>{activeBreakdownDimensions.length ? `${activeBreakdownDimensions.map((dimension) => dimension.label).join(" › ")} › 손익 항목` : "손익 항목"}</span>{displayPeriods.map((period) => <span key={period.label}>{period.label}</span>)}</div>{matrixGroups.map((group) => <div className="report-group" key={group.key}>{activeBreakdownDimensions.length > 0 && <div className="report-row report-group-header" style={reportGridStyle}><strong>{group.label}</strong></div>}{group.rows.map((row) => <div className={row.code === "operating_profit" ? "report-row strong" : "report-row"} style={reportGridStyle} key={`${group.key}-${row.code}`}><span>{row.label}</span>{row.amounts.map((value, index) => <b key={`${row.code}-${index}`}>{loading ? "불러오는 중…" : amount(value)}</b>)}</div>)}</div>)}</div><footer>{source === "sample" ? "공개 체험용 예시 데이터를 표시 중입니다." : "Supabase 적재 데이터를 기준으로 표시 중입니다."}<span>영업이익률 {operatingMargin ?? "-"}%</span></footer></section>
-      <section className="upload-inline"><div><strong>RAW 업로드</strong><span>로그인 없이 XLSX 또는 CSV 원본을 업로드하면 몇 분 내 손익 데이터까지 자동 적재합니다.</span></div><label className="file-label"><input ref={fileInput} type="file" accept=".xlsx,.csv" onChange={selectFile} /><em>{file?.name ?? "XLSX 또는 CSV 파일 선택"}</em></label><button className="primary-button" onClick={uploadRaw}>업로드 및 적재</button>{uploadMessage && <p>{uploadMessage}</p>}</section>
+      <section className="upload-inline"><div><strong>RAW 업로드</strong><span>로그인 없이 XLSX 또는 CSV 원본을 업로드하면 몇 분 내 손익 데이터까지 자동 적재합니다.</span></div><label className="file-label"><input type="file" accept=".xlsx,.csv" onChange={selectFile} /><em>{file?.name ?? "XLSX 또는 CSV 파일 선택"}</em></label><button className="primary-button" onClick={uploadRaw}>업로드 및 적재</button>{uploadMessage && <p>{uploadMessage}</p>}</section>
       </section>
 
       <aside className="selection-panel"><div className="selection-title"><div><strong>선택된 항목</strong><small>⋮⋮ 손잡이를 끌어 순서·행/열 변경</small></div><span>{layout.rows.length + layout.columns.length}개</span></div><div className="selection-group" onDragOver={(event) => allowAxisDrop(event, "rows")} onDrop={(event) => finishAxisDrop(event, "rows")}><h3>행 [{layout.rows.length}]</h3>{layout.rows.map((item) => <div className={draggedItem?.item === item ? "selected-item dragging" : "selected-item"} key={`row-${item}`} draggable onDragStart={(event) => startAxisDrag(event, "rows", item)} onDragEnd={endAxisDrag} onDragOver={(event) => allowAxisDrop(event, "rows")} onDrop={(event) => finishAxisDrop(event, "rows", item)}><span>⋮⋮ {item}</span><button onClick={() => moveAxisItem("rows", item, -1)}>↑</button><button onClick={() => moveAxisItem("rows", item, 1)}>↓</button><button onClick={() => removeFromAxis("rows", item)}>×</button></div>)}</div><div className="selection-group" onDragOver={(event) => allowAxisDrop(event, "columns")} onDrop={(event) => finishAxisDrop(event, "columns")}><h3>열 [{layout.columns.length}]</h3>{layout.columns.map((item) => <div className={draggedItem?.item === item ? "selected-item dragging" : "selected-item"} key={`column-${item}`} draggable onDragStart={(event) => startAxisDrag(event, "columns", item)} onDragEnd={endAxisDrag} onDragOver={(event) => allowAxisDrop(event, "columns")} onDrop={(event) => finishAxisDrop(event, "columns", item)}><span>⋮⋮ {item}</span><button onClick={() => moveAxisItem("columns", item, -1)}>↑</button><button onClick={() => moveAxisItem("columns", item, 1)}>↓</button><button onClick={() => removeFromAxis("columns", item)}>×</button></div>)}</div><div className="recommended-presets"><h3>기본 프리셋으로 빠르게 시작</h3><p>색상 카드를 선택하면 권장 행·열 구성이 즉시 적용됩니다.</p>{systemPresets.map((preset) => <button key={preset.id} onClick={() => applyPreset(preset)}><span>기본</span>{preset.name}</button>)}</div></aside>
