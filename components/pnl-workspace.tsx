@@ -44,7 +44,36 @@ const breakdownDimensions: Array<{ label: string; value: BreakdownDimension }> =
 const money = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 });
 
 function amount(value: number | null) { return value === null ? "데이터 없음" : money.format(value); }
-function csvCell(value: string | number | null) { return `"${String(value ?? "").replaceAll('"', '""')}"`; }
+function columnName(column: number) {
+  let value = "";
+  for (let current = column; current > 0; current = Math.floor((current - 1) / 26)) value = String.fromCharCode(65 + ((current - 1) % 26)) + value;
+  return value;
+}
+function parseCsvRows(source: string) {
+  const rows: string[][] = []; let row: string[] = []; let cell = ""; let quoted = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]; const next = source[index + 1];
+    if (character === '"' && quoted && next === '"') { cell += '"'; index += 1; }
+    else if (character === '"') quoted = !quoted;
+    else if (character === "," && !quoted) { row.push(cell); cell = ""; }
+    else if ((character === "\n" || character === "\r") && !quoted) {
+      if (character === "\r" && next === "\n") index += 1;
+      row.push(cell.replace(/^\uFEFF/, "")); rows.push(row); row = []; cell = "";
+    } else cell += character;
+  }
+  if (cell || row.length) { row.push(cell.replace(/^\uFEFF/, "")); rows.push(row); }
+  return rows;
+}
+function excelValue(value: unknown): string | number | boolean | Date | null {
+  if (value === null || value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value instanceof Date) return value ?? null;
+  if (typeof value === "object") {
+    const record = value as { result?: unknown; text?: unknown; hyperlink?: unknown };
+    if (record.result !== undefined) return excelValue(record.result);
+    if (typeof record.text === "string") return record.text;
+    if (typeof record.hyperlink === "string") return record.hyperlink;
+  }
+  return String(value);
+}
 function spacedExamples(values: Array<string | number | null | undefined>, fallback: string[]) {
   const unique = [...new Set(values.filter((value): value is string | number => value !== null && value !== undefined && String(value).trim() !== "").map(String))].sort((left, right) => left.localeCompare(right, "ko"));
   if (unique.length < 3) return unique.length ? unique : fallback;
@@ -89,6 +118,7 @@ export function PnlWorkspace() {
   const [dragOverAxis, setDragOverAxis] = useState<Axis | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   const yearDragStart = useRef<string | null>(null);
   const suppressYearClick = useRef(false);
   const activeBreakdownDimensions = useMemo(() => breakdownDimensions.filter((dimension) => layout.rows.includes(dimension.label)), [layout.rows]);
@@ -241,20 +271,58 @@ export function PnlWorkspace() {
   function endAxisDrag() { setDraggedItem(null); setDragOverAxis(null); }
   function swapAxes() { setLayout((current) => ({ ...current, rows: current.columns, columns: current.rows })); setActiveAxis((current) => current === "rows" ? "columns" : "rows"); }
   function applyPreset(preset: SavedPreset) { setLayout(ensureConfig(preset.config)); setPresetMessage(`‘${preset.name}’ 설정을 적용했습니다.`); }
-  function downloadCsv() {
+  async function downloadExcel() {
+    if (!file) { setUploadMessage("RAW 시트를 포함하려면 먼저 원본 XLSX 또는 CSV 파일을 선택하세요."); return; }
+    setExporting(true); setUploadMessage(null);
     const datasetName = filters.dataset === "전체" ? "전체" : datasets.find((dataset) => dataset.id === filters.dataset)?.name ?? "선택 데이터베이스";
     const yearRange = filters.selectedYears.length ? filters.selectedYears.sort().join(", ") : `${filters.yearFrom || "전체"}~${filters.yearTo || "전체"}`;
-    const rowHeaders = activeBreakdownDimensions.length ? activeBreakdownDimensions.map((dimension) => dimension.label) : ["구분"];
-    const data = [
-      [...rowHeaders, "손익 항목", ...displayPeriods.map((period) => period.label)],
-      ...matrixGroups.flatMap((group) => group.rows.map((row) => [
+    try {
+      const ExcelJS = await import("exceljs");
+      const workbook = new ExcelJS.Workbook();
+      const rawSheet = workbook.addWorksheet("RAW", { views: [{ state: "frozen", ySplit: 1 }] });
+      if (/\.csv$/i.test(file.name)) rawSheet.addRows(parseCsvRows(await file.text()));
+      else {
+        const sourceWorkbook = new ExcelJS.Workbook();
+        await sourceWorkbook.xlsx.load(await file.arrayBuffer());
+        const sourceSheet = sourceWorkbook.worksheets[0];
+        if (!sourceSheet) throw new Error("원본 XLSX에서 첫 번째 시트를 찾을 수 없습니다.");
+        const sourceColumns = Math.max(sourceSheet.actualColumnCount, 1);
+        sourceSheet.eachRow({ includeEmpty: true }, (row) => rawSheet.addRow(Array.from({ length: sourceColumns }, (_, index) => excelValue(row.getCell(index + 1).value))));
+      }
+      if (rawSheet.rowCount > 0 && rawSheet.actualColumnCount > 0) {
+        rawSheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+        rawSheet.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF244B93" } };
+        rawSheet.autoFilter = `A1:${columnName(rawSheet.actualColumnCount)}1`;
+      }
+      rawSheet.columns.forEach((column) => { column.width = 16; });
+
+      const pivotSheet = workbook.addWorksheet("피벗테이블", { views: [{ state: "frozen", ySplit: 5 }] });
+      const rowHeaders = activeBreakdownDimensions.length ? activeBreakdownDimensions.map((dimension) => dimension.label) : ["구분"];
+      const pivotHeader = [...rowHeaders, "손익 항목", ...displayPeriods.map((period) => period.label)];
+      pivotSheet.addRow(["P/L Explorer 피벗테이블"]);
+      pivotSheet.mergeCells(1, 1, 1, pivotHeader.length);
+      pivotSheet.getCell("A1").font = { bold: true, size: 15, color: { argb: "FF173B7A" } };
+      pivotSheet.addRow(["데이터베이스", datasetName]);
+      pivotSheet.addRow(["행 구성", layout.rows.join(" > ") || "없음"]);
+      pivotSheet.addRow(["기간", displayPeriods.map((period) => period.label).join(", ")]);
+      pivotSheet.addRow([]);
+      const headerRow = pivotSheet.addRow(pivotHeader);
+      headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      headerRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF244B93" } };
+      matrixGroups.forEach((group) => group.rows.forEach((row) => pivotSheet.addRow([
         ...(activeBreakdownDimensions.length ? group.values : ["전체"]),
         row.label,
         ...row.amounts,
-      ])),
-    ];
-    const blob = new Blob(["\uFEFF" + data.map((line) => line.map(csvCell).join(",")).join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `손익_${datasetName}_${yearRange}.csv`; anchor.click(); URL.revokeObjectURL(url);
+      ])));
+      pivotSheet.columns.forEach((column, index) => { column.width = index < pivotHeader.length - displayPeriods.length ? 18 : 16; });
+      for (let column = pivotHeader.length - displayPeriods.length + 1; column <= pivotHeader.length; column += 1) pivotSheet.getColumn(column).numFmt = "#,##0";
+      pivotSheet.autoFilter = `A6:${columnName(pivotHeader.length)}${pivotSheet.rowCount}`;
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `손익_${datasetName}_${yearRange}.xlsx`; anchor.click(); URL.revokeObjectURL(url);
+      setUploadMessage("RAW와 피벗테이블 시트가 포함된 Excel 파일을 내려받았습니다.");
+    } catch (error) { setUploadMessage(`Excel 생성 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`); }
+    finally { setExporting(false); }
   }
   function selectFile(event: ChangeEvent<HTMLInputElement>) { setFile(event.target.files?.[0] ?? null); setUploadMessage(null); }
   async function uploadRaw() {
@@ -281,7 +349,7 @@ export function PnlWorkspace() {
     <div className="analysis-shell">
       <aside className="field-palette"><h1>손익 분석</h1><p>추천 프리셋부터 적용한 뒤 필요한 항목만 조정하세요.</p><div className="preset-strip"><div className="preset-heading"><span>추천 기본 프리셋</span><small>가장 빠른 시작 방법</small></div><div className="preset-grid">{systemPresets.map((preset, index) => <button key={preset.id} className={`preset preset-${index + 1}${activePreset?.id === preset.id ? " active" : ""}`} onClick={() => applyPreset(preset)}><b>{preset.name}</b><small>{preset.description}</small><em>{activePreset?.id === preset.id ? "적용 중" : "바로 적용"}</em></button>)}</div>{presetMessage && <p className="preset-message">{presetMessage}</p>}</div><input className="palette-search" value={paletteSearch} onChange={(event) => setPaletteSearch(event.target.value)} placeholder="항목 검색" />
         <div className="field-grid">{palette.map((item) => <div className="field-option" key={item}><button onClick={() => addToAxis(item)} aria-describedby={`examples-${item}`}><i>⋮⋮</i>{item}</button><div className="field-tooltip" id={`examples-${item}`} role="tooltip"><small>예시 값 · 25% / 50% / 75% 구간</small>{(fieldExamples[item] ?? initialFieldExamples[item]).map((example) => <span key={example}>{example}</span>)}</div></div>)}</div>
-        <div className="run-row"><button className="reset-button" onClick={() => setLayout(systemPresets[0].config)} title="기본 설정으로 되돌리기">↻</button><button className="run-button" onClick={downloadCsv}>분석하기 <span>⌄</span></button></div>
+        <div className="run-row"><button className="reset-button" onClick={() => setLayout(systemPresets[0].config)} title="기본 설정으로 되돌리기">↻</button><button className="run-button" onClick={downloadExcel} disabled={exporting}>{exporting ? "Excel 생성 중…" : "Excel 내려받기"} <span>⌄</span></button></div>
       </aside>
 
       <section className="builder-area">
