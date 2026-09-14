@@ -13,6 +13,8 @@ type SavedPreset = { id: string; name: string; description: string | null; confi
 type Dataset = { id: string; name: string };
 type FilterOptions = { years: string[]; products: string[]; brands: string[]; customers: string[]; sites: string[] };
 type FilterOptionPayload = FilterOptions & { datasets: Dataset[] };
+type BreakdownDimension = "product" | "brand" | "customer" | "site";
+type BreakdownRecord = { dimension_value: string; account_code: StatementCode; amount: number | string };
 
 const paletteItems = ["측정치", "기간", "제품", "브랜드", "분류", "효능군", "고객구분", "사업장", "대구분", "중구분", "소구분", "국가"];
 const initialFieldExamples: Record<string, string[]> = {
@@ -35,6 +37,10 @@ const systemPresets: SavedPreset[] = [
   { id: "system-site", name: "사업장별 수익성", description: "사업장별 매출과 영업이익을 비교", isSystem: true, config: { rows: ["사업장"], columns: ["측정치", "기간"], filters: ["제품", "브랜드", "고객구분"] } },
 ];
 const initialFilters: FilterState = { dataset: "전체", yearFrom: "", yearTo: "", selectedYears: [], product: [], brand: [], customer: [], site: [] };
+const breakdownDimensions: Array<{ label: string; value: BreakdownDimension }> = [
+  { label: "제품", value: "product" }, { label: "브랜드", value: "brand" },
+  { label: "고객구분", value: "customer" }, { label: "사업장", value: "site" },
+];
 const money = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 });
 
 function amount(value: number | null) { return value === null ? "데이터 없음" : money.format(value); }
@@ -69,6 +75,7 @@ export function PnlWorkspace() {
   const [filters, setFilters] = useState<FilterState>(initialFilters);
   const [filterOptions, setFilterOptions] = useState(sampleFilters);
   const [rows, setRows] = useState<StatementRow[]>(sampleStatementRows);
+  const [breakdownRows, setBreakdownRows] = useState<BreakdownRecord[]>([]);
   const [source, setSource] = useState<"sample" | "supabase">("sample");
   const [loading, setLoading] = useState(false);
   const [layout, setLayout] = useState<LayoutConfig>(systemPresets[0].config);
@@ -84,6 +91,7 @@ export function PnlWorkspace() {
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const yearDragStart = useRef<string | null>(null);
   const suppressYearClick = useRef(false);
+  const breakdownDimension = useMemo(() => breakdownDimensions.find((dimension) => layout.rows.includes(dimension.label)) ?? null, [layout.rows]);
   useEffect(() => {
     const client = configuredClient;
     if (!client) return;
@@ -105,11 +113,11 @@ export function PnlWorkspace() {
 
   useEffect(() => {
     const client = configuredClient;
-    if (!client) { setRows(sampleStatementRows); setSource("sample"); return; }
-    if (!selectedMeasures.length) { setRows(statementOrder.map(({ code, label }) => ({ code, label, amount: null }))); setSource("supabase"); return; }
+    if (!client) { setRows(sampleStatementRows); setBreakdownRows([]); setSource("sample"); return; }
+    if (!selectedMeasures.length) { setRows(statementOrder.map(({ code, label }) => ({ code, label, amount: null }))); setBreakdownRows([]); setSource("supabase"); return; }
     async function loadRows(activeClient: NonNullable<typeof client>) {
       setLoading(true);
-      const { data, error } = await activeClient.rpc("pnl_statement_totals", {
+      const parameters = {
         p_dataset: filters.dataset === "전체" ? null : filters.dataset,
         p_years: filters.selectedYears.length ? filters.selectedYears.map(Number) : null,
         p_year_from: filters.selectedYears.length ? null : (filters.yearFrom ? Number(filters.yearFrom) : null),
@@ -118,12 +126,18 @@ export function PnlWorkspace() {
         p_brands: filters.brand.length ? filters.brand : null,
         p_customers: filters.customer.length ? filters.customer : null,
         p_sites: filters.site.length ? filters.site : null,
-      });
-      if (!error && data) { setRows(asRows(data as { account_code: StatementCode; amount: number | string }[])); setSource("supabase"); }
+      };
+      const [totals, breakdown] = await Promise.all([
+        activeClient.rpc("pnl_statement_totals", parameters),
+        breakdownDimension ? activeClient.rpc("pnl_statement_breakdown", { p_dimension: breakdownDimension.value, ...parameters }) : Promise.resolve({ data: [], error: null }),
+      ]);
+      if (!totals.error && totals.data) { setRows(asRows(totals.data as { account_code: StatementCode; amount: number | string }[])); setSource("supabase"); }
+      if (!breakdown.error && breakdown.data) setBreakdownRows(breakdown.data as BreakdownRecord[]);
+      else setBreakdownRows([]);
       setLoading(false);
     }
     void loadRows(client);
-  }, [configuredClient, filters, selectedMeasures]);
+  }, [configuredClient, filters, selectedMeasures, breakdownDimension]);
 
   useEffect(() => {
     const endYearDrag = () => { yearDragStart.current = null; };
@@ -140,6 +154,16 @@ export function PnlWorkspace() {
   const palette = paletteItems.filter((item) => item.includes(paletteSearch.trim()));
   const activePreset = systemPresets.find((preset) => JSON.stringify(preset.config) === JSON.stringify(layout));
   const availableYears = filterOptions.years.filter((year) => /^\d{4}$/.test(year)).sort((left, right) => Number(left) - Number(right));
+  const breakdownGroups = useMemo(() => {
+    const values = [...new Set(breakdownRows.map((row) => row.dimension_value))].sort((left, right) => left.localeCompare(right, "ko"));
+    return values.map((value) => ({
+      value,
+      rows: statementOrder.filter(({ code }) => selectedMeasures.includes(code)).map(({ code, label }) => {
+        const record = breakdownRows.find((row) => row.dimension_value === value && row.account_code === code);
+        return { code, label, amount: record ? Number(record.amount) : null };
+      }),
+    }));
+  }, [breakdownRows, selectedMeasures]);
 
   function updateFilter(key: keyof FilterState, value: string) { setFilters((current) => ({ ...current, [key]: value })); }
   function updateMultiFilter(key: "product" | "brand" | "customer" | "site", values: string[]) { setFilters((current) => ({ ...current, [key]: values })); }
@@ -195,7 +219,9 @@ export function PnlWorkspace() {
   function downloadCsv() {
     const datasetName = filters.dataset === "전체" ? "전체" : datasets.find((dataset) => dataset.id === filters.dataset)?.name ?? "선택 데이터베이스";
     const yearRange = filters.selectedYears.length ? filters.selectedYears.sort().join(", ") : `${filters.yearFrom || "전체"}~${filters.yearTo || "전체"}`;
-    const data = [["손익 항목", `${datasetName} · ${yearRange}`, "행 구성", "열 구성"], ...visibleRows.map((row) => [row.label, row.amount, layout.rows.join(" > "), layout.columns.join(" > ")])];
+    const data = breakdownDimension
+      ? [[breakdownDimension.label, "손익 항목", `${datasetName} · ${yearRange}`, "행 구성", "열 구성"], ...breakdownGroups.flatMap((group) => group.rows.map((row) => [group.value, row.label, row.amount, layout.rows.join(" > "), layout.columns.join(" > ")]))]
+      : [["손익 항목", `${datasetName} · ${yearRange}`, "행 구성", "열 구성"], ...visibleRows.map((row) => [row.label, row.amount, layout.rows.join(" > "), layout.columns.join(" > ")])];
     const blob = new Blob(["\uFEFF" + data.map((line) => line.map(csvCell).join(",")).join("\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `손익_${yearRange}.csv`; anchor.click(); URL.revokeObjectURL(url);
   }
@@ -233,7 +259,7 @@ export function PnlWorkspace() {
         <section className="filter-bar"><strong>필터</strong><label><span>데이터베이스</span><select value={filters.dataset} onChange={(event) => updateFilter("dataset", event.target.value)}><option value="전체">전체</option>{datasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}</select></label><div className="year-picker"><span>기간</span><div className="year-range"><select value={filters.yearFrom} onChange={(event) => updateFilter("yearFrom", event.target.value)}><option value="">시작 연도</option>{availableYears.map((year) => <option key={year} value={year}>{year}</option>)}</select><i>~</i><select value={filters.yearTo} onChange={(event) => updateFilter("yearTo", event.target.value)}><option value="">종료 연도</option>{availableYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></div><div className="year-select-actions"><small>개별 선택 또는 클릭 후 끌어 연속 선택</small>{filters.selectedYears.length > 0 && <button type="button" onClick={() => setFilters((current) => ({ ...current, selectedYears: [] }))}>개별 선택 해제</button>}</div><div className="year-checkboxes">{availableYears.map((year) => <button type="button" role="checkbox" aria-checked={filters.selectedYears.includes(year)} className={filters.selectedYears.includes(year) ? "checked" : ""} key={year} onPointerDown={(event) => startYearDrag(year, event)} onPointerEnter={(event) => extendYearDrag(year, event)} onClick={() => toggleYear(year)}>{filters.selectedYears.includes(year) ? "✓" : ""} {year}</button>)}</div></div>{filterDefinitions.filter((filter) => layout.filters.includes(filter.label)).map((filter) => <PivotFilter key={filter.key} label={filter.label} values={filter.values.filter((value) => value !== "전체")} selected={filters[filter.key]} onChange={(values) => updateMultiFilter(filter.key, values)} />)}<button className="filter-more" onClick={() => setLayout((current) => ({ ...current, filters: paletteItems.filter((item) => !["측정치", "기간"].includes(item)) }))}>필터 더보기</button></section>
         <section className="measure-picker"><div className="measure-picker-heading"><div><strong>조회 손익 항목</strong><span>행·열 배치와 별개로 조회할 측정치를 선택합니다.</span></div><button type="button" className="measure-reset" onClick={() => setSelectedMeasures(statementOrder.map((item) => item.code))}>전체 선택</button></div><div className="measure-options">{statementOrder.map(({ code, label }) => <label className={selectedMeasures.includes(code) ? "measure-option checked" : "measure-option"} key={code}><input type="checkbox" checked={selectedMeasures.includes(code)} onChange={() => toggleMeasure(code)} /><span>{label}</span></label>)}</div><p>{selectedMeasures.length ? `${selectedMeasures.length}개 항목 선택됨` : "최소 1개 이상 선택하세요"}</p></section>
         <section className="search-panel"><div><strong>조회 설계</strong><span>행과 열은 비교 기준, 손익 항목은 별도 선택으로 조합합니다.</span></div><button className="detail-search">상세검색</button></section>
-        <section className="report-panel"><div className="report-heading"><div><p>미리보기</p><h2>{activePreset?.name ?? "사용자 지정 분석"}</h2></div><div className="report-meta"><span>{layout.rows.join(" · ") || "행 없음"}</span><b>×</b><span>{layout.columns.join(" · ") || "열 없음"}</span></div></div><div className="report-table"><div className="report-row report-header"><span>구분</span><span>{filters.selectedYears.length ? filters.selectedYears.sort().join(", ") : `${filters.yearFrom || "전체"} ~ ${filters.yearTo || "전체"}`}</span></div>{visibleRows.map((row) => <div className={row.code === "operating_profit" ? "report-row strong" : "report-row"} key={row.code}><span>{row.label}</span><b>{loading ? "불러오는 중…" : amount(row.amount)}</b></div>)}</div><footer>{source === "sample" ? "공개 체험용 예시 데이터를 표시 중입니다." : "Supabase 적재 데이터를 기준으로 표시 중입니다."}<span>영업이익률 {operatingMargin ?? "-"}%</span></footer></section>
+        <section className="report-panel"><div className="report-heading"><div><p>미리보기</p><h2>{activePreset?.name ?? "사용자 지정 분석"}</h2></div><div className="report-meta"><span>{layout.rows.join(" · ") || "행 없음"}</span><b>×</b><span>{layout.columns.join(" · ") || "열 없음"}</span></div></div><div className="report-table"><div className="report-row report-header"><span>{breakdownDimension?.label ?? "구분"}</span><span>{filters.selectedYears.length ? filters.selectedYears.sort().join(", ") : `${filters.yearFrom || "전체"} ~ ${filters.yearTo || "전체"}`}</span></div>{breakdownDimension ? (breakdownGroups.length ? breakdownGroups.map((group) => <div className="report-group" key={group.value}><div className="report-row report-group-header"><strong>{group.value}</strong><span>{breakdownDimension.label}별 손익</span></div>{group.rows.map((row) => <div className={row.code === "operating_profit" ? "report-row strong" : "report-row"} key={`${group.value}-${row.code}`}><span>{row.label}</span><b>{loading ? "불러오는 중…" : amount(row.amount)}</b></div>)}</div>) : <div className="report-row"><span>표시할 {breakdownDimension.label} 데이터가 없습니다.</span><b>-</b></div>) : visibleRows.map((row) => <div className={row.code === "operating_profit" ? "report-row strong" : "report-row"} key={row.code}><span>{row.label}</span><b>{loading ? "불러오는 중…" : amount(row.amount)}</b></div>)}</div><footer>{source === "sample" ? "공개 체험용 예시 데이터를 표시 중입니다." : "Supabase 적재 데이터를 기준으로 표시 중입니다."}<span>영업이익률 {operatingMargin ?? "-"}%</span></footer></section>
       <section className="upload-inline"><div><strong>RAW 업로드</strong><span>로그인 없이 XLSX 또는 CSV 원본을 업로드하면 몇 분 내 손익 데이터까지 자동 적재합니다.</span></div><label className="file-label"><input type="file" accept=".xlsx,.csv" onChange={selectFile} /><em>{file?.name ?? "XLSX 또는 CSV 파일 선택"}</em></label><button className="primary-button" onClick={uploadRaw}>업로드 및 적재</button>{uploadMessage && <p>{uploadMessage}</p>}</section>
       </section>
 
