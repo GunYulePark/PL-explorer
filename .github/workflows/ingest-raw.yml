@@ -1,6 +1,12 @@
 name: Ingest uploaded RAW files
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ingest-raw.yml"
+      - "scripts/**"
+      - "assets/pnl-native-pivot-template.xlsx"
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
