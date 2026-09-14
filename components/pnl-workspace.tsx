@@ -44,52 +44,6 @@ const breakdownDimensions: Array<{ label: string; value: BreakdownDimension }> =
 const money = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 });
 
 function amount(value: number | null) { return value === null ? "데이터 없음" : money.format(value); }
-function columnName(column: number) {
-  let value = "";
-  for (let current = column; current > 0; current = Math.floor((current - 1) / 26)) value = String.fromCharCode(65 + ((current - 1) % 26)) + value;
-  return value;
-}
-function parseCsvRows(source: string) {
-  const rows: string[][] = []; let row: string[] = []; let cell = ""; let quoted = false;
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index]; const next = source[index + 1];
-    if (character === '"' && quoted && next === '"') { cell += '"'; index += 1; }
-    else if (character === '"') quoted = !quoted;
-    else if (character === "," && !quoted) { row.push(cell); cell = ""; }
-    else if ((character === "\n" || character === "\r") && !quoted) {
-      if (character === "\r" && next === "\n") index += 1;
-      row.push(cell.replace(/^\uFEFF/, "")); rows.push(row); row = []; cell = "";
-    } else cell += character;
-  }
-  if (cell || row.length) { row.push(cell.replace(/^\uFEFF/, "")); rows.push(row); }
-  return rows;
-}
-function excelValue(value: unknown): string | number | boolean | Date | null {
-  if (value === null || value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value instanceof Date) return value ?? null;
-  if (typeof value === "object") {
-    const record = value as { result?: unknown; text?: unknown; hyperlink?: unknown };
-    if (record.result !== undefined) return excelValue(record.result);
-    if (typeof record.text === "string") return record.text;
-    if (typeof record.hyperlink === "string") return record.hyperlink;
-  }
-  return String(value);
-}
-function rawText(value: unknown) { return String(value ?? "").trim(); }
-function rawYear(value: unknown) { return rawText(value).match(/(?:19|20)\d{2}/)?.[0] ?? ""; }
-function filterRawRows(rows: Array<Array<string | number | boolean | Date | null>>, filters: FilterState) {
-  if (!rows.length) return rows;
-  const hasYearFilter = filters.selectedYears.length > 0 || Boolean(filters.yearFrom) || Boolean(filters.yearTo);
-  const matches = (values: string[], value: unknown) => !values.length || values.includes(rawText(value));
-  return [rows[0], ...rows.slice(1).filter((row) => {
-    if (!row.some((value) => rawText(value))) return false;
-    const year = rawYear(row[0]);
-    if (filters.selectedYears.length && !filters.selectedYears.includes(year)) return false;
-    if (hasYearFilter && !year) return false;
-    if (filters.yearFrom && Number(year) < Number(filters.yearFrom)) return false;
-    if (filters.yearTo && Number(year) > Number(filters.yearTo)) return false;
-    return matches(filters.product, row[7]) && matches(filters.brand, row[8]) && matches(filters.customer, row[14]) && matches(filters.site, row[19]);
-  })];
-}
 function spacedExamples(values: Array<string | number | null | undefined>, fallback: string[]) {
   const unique = [...new Set(values.filter((value): value is string | number => value !== null && value !== undefined && String(value).trim() !== "").map(String))].sort((left, right) => left.localeCompare(right, "ko"));
   if (unique.length < 3) return unique.length ? unique : fallback;
@@ -292,70 +246,35 @@ export function PnlWorkspace() {
     const exportDatasetId = filters.dataset === "전체" ? (datasets.length > 1 ? undefined : null) : filters.dataset;
     if (!configuredClient || exportDatasetId === undefined) { setExportMessage("여러 데이터베이스가 적재되어 있습니다. RAW와 일치하도록 데이터베이스 하나를 선택하세요."); return; }
     setExporting(true); setExportMessage(null); setUploadMessage(null);
-    let datasetName = exportDatasetId ? datasets.find((dataset) => dataset.id === exportDatasetId)?.name ?? "선택 데이터베이스" : "전체";
-    const yearRange = filters.selectedYears.length ? filters.selectedYears.sort().join(", ") : `${filters.yearFrom || "전체"}~${filters.yearTo || "전체"}`;
     try {
       const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
       const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
       if (!supabaseUrl || !publishableKey) throw new Error("Supabase 연결 정보를 찾을 수 없습니다.");
-      const sourceUrl = exportDatasetId ? `${supabaseUrl}/functions/v1/pnl-raw-download?dataset=${encodeURIComponent(exportDatasetId)}` : `${supabaseUrl}/functions/v1/pnl-raw-download`;
-      const rawResponse = await fetch(sourceUrl, { headers: { Authorization: `Bearer ${publishableKey}`, apikey: publishableKey } });
-      if (!rawResponse.ok) {
-        const problem = await rawResponse.json().catch(() => null) as { error?: string } | null;
-        throw new Error(problem?.error ?? "서버에서 원본 파일을 가져오지 못했습니다.");
+      const { data: jobId, error: requestError } = await configuredClient.rpc("create_public_pivot_export", {
+        p_dataset: exportDatasetId, p_years: filters.selectedYears.length ? filters.selectedYears.map(Number) : null,
+        p_year_from: filters.selectedYears.length ? null : (filters.yearFrom ? Number(filters.yearFrom) : null),
+        p_year_to: filters.selectedYears.length ? null : (filters.yearTo ? Number(filters.yearTo) : null),
+        p_products: filters.product.length ? filters.product : null, p_brands: filters.brand.length ? filters.brand : null,
+        p_customers: filters.customer.length ? filters.customer : null, p_sites: filters.site.length ? filters.site : null,
+      });
+      if (requestError || !jobId) throw new Error(requestError?.message ?? "Excel 생성 요청을 등록하지 못했습니다.");
+      setExportMessage("필터 적용 RAW와 실제 PivotTable을 서버에서 생성 중입니다. 보통 5분 이내에 자동으로 내려받습니다…");
+      const deadline = Date.now() + 8 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 10_000));
+        const { data: statusRows, error: statusError } = await configuredClient.rpc("pnl_pivot_export_status", { p_job_id: jobId });
+        if (statusError) throw new Error(statusError.message);
+        const status = (statusRows as Array<{ status: string; error_message: string | null }> | null)?.[0];
+        if (!status || status.status === "queued" || status.status === "processing") continue;
+        if (status.status === "failed") throw new Error(status.error_message ?? "서버 Excel 생성에 실패했습니다.");
+        const response = await fetch(`${supabaseUrl}/functions/v1/pnl-pivot-download?job=${encodeURIComponent(jobId)}`, { headers: { Authorization: `Bearer ${publishableKey}`, apikey: publishableKey } });
+        if (!response.ok) throw new Error("생성된 Excel 파일을 가져오지 못했습니다.");
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = "P_L_Explorer_Pivot.xlsx"; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+        setExportMessage("필터 적용 RAW 시트와 실제 PivotTable 시트를 내려받았습니다.");
+        return;
       }
-      const sourceBlob = await rawResponse.blob();
-      datasetName = decodeURIComponent(rawResponse.headers.get("x-dataset-name") ?? datasetName);
-      const sourceFilename = decodeURIComponent(rawResponse.headers.get("x-source-filename") ?? "RAW.xlsx");
-      const ExcelJS = await import("exceljs");
-      const workbook = new ExcelJS.Workbook();
-      const rawSheet = workbook.addWorksheet("RAW", { views: [{ state: "frozen", ySplit: 1 }] });
-      let sourceRows: Array<Array<string | number | boolean | Date | null>>;
-      if (/\.csv$/i.test(sourceFilename)) sourceRows = parseCsvRows(await sourceBlob.text());
-      else {
-        const sourceWorkbook = new ExcelJS.Workbook();
-        await sourceWorkbook.xlsx.load(await sourceBlob.arrayBuffer());
-        const sourceSheet = sourceWorkbook.worksheets[0];
-        if (!sourceSheet) throw new Error("원본 XLSX에서 첫 번째 시트를 찾을 수 없습니다.");
-        const sourceColumns = Math.max(sourceSheet.actualColumnCount, 1);
-        sourceRows = [];
-        sourceSheet.eachRow({ includeEmpty: true }, (row) => sourceRows.push(Array.from({ length: sourceColumns }, (_, index) => excelValue(row.getCell(index + 1).value))));
-      }
-      const filteredRawRows = filterRawRows(sourceRows, filters);
-      rawSheet.addRows(filteredRawRows);
-      if (rawSheet.rowCount > 0 && rawSheet.actualColumnCount > 0) {
-        rawSheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
-        rawSheet.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF244B93" } };
-        rawSheet.autoFilter = `A1:${columnName(rawSheet.actualColumnCount)}1`;
-      }
-      rawSheet.columns.forEach((column) => { column.width = 16; });
-
-      const pivotSheet = workbook.addWorksheet("피벗테이블", { views: [{ state: "frozen", ySplit: 6 }] });
-      const rowHeaders = activeBreakdownDimensions.length ? activeBreakdownDimensions.map((dimension) => dimension.label) : ["구분"];
-      const pivotHeader = [...rowHeaders, "손익 항목", ...displayPeriods.map((period) => period.label)];
-      pivotSheet.addRow(["P/L Explorer 피벗테이블"]);
-      pivotSheet.mergeCells(1, 1, 1, pivotHeader.length);
-      pivotSheet.getCell("A1").font = { bold: true, size: 15, color: { argb: "FF173B7A" } };
-      pivotSheet.addRow(["데이터베이스", datasetName]);
-      pivotSheet.addRow(["행 구성", layout.rows.join(" > ") || "없음"]);
-      pivotSheet.addRow(["기간", displayPeriods.map((period) => period.label).join(", ")]);
-      pivotSheet.addRow(["RAW 행 수", Math.max(filteredRawRows.length - 1, 0)]);
-      pivotSheet.addRow([]);
-      const headerRow = pivotSheet.addRow(pivotHeader);
-      headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
-      headerRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF244B93" } };
-      matrixGroups.forEach((group) => group.rows.forEach((row) => pivotSheet.addRow([
-        ...(activeBreakdownDimensions.length ? group.values : ["전체"]),
-        row.label,
-        ...row.amounts,
-      ])));
-      pivotSheet.columns.forEach((column, index) => { column.width = index < pivotHeader.length - displayPeriods.length ? 18 : 16; });
-      for (let column = pivotHeader.length - displayPeriods.length + 1; column <= pivotHeader.length; column += 1) pivotSheet.getColumn(column).numFmt = "#,##0";
-      pivotSheet.autoFilter = `A7:${columnName(pivotHeader.length)}${pivotSheet.rowCount}`;
-      const buffer = await workbook.xlsx.writeBuffer();
-      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-      const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `손익_${datasetName}_${yearRange}.xlsx`; anchor.click(); URL.revokeObjectURL(url);
-      setExportMessage(`필터 적용 RAW ${Math.max(filteredRawRows.length - 1, 0).toLocaleString("ko-KR")}행과 피벗테이블 시트가 포함된 Excel 파일을 내려받았습니다.`);
+      setExportMessage("생성 요청은 접수되었습니다. 작업이 끝나면 Excel 내려받기를 다시 눌러 주세요.");
     } catch (error) { setExportMessage(`Excel 생성 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`); }
     finally { setExporting(false); }
   }
