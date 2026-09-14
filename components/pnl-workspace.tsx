@@ -259,7 +259,7 @@ export function PnlWorkspace() {
         p_layout: { rows: layout.rows, columns: layout.columns },
       });
       if (requestError || !jobId) throw new Error(requestError?.message ?? "Excel 생성 요청을 등록하지 못했습니다.");
-      setExportMessage("필터 적용 RAW와 실제 PivotTable을 서버에서 즉시 생성 중입니다…");
+      setExportMessage("필터 적용 RAW와 일반 Excel 요약표를 서버에서 즉시 생성 중입니다…");
       const generate = await fetch(`${supabaseUrl}/functions/v1/pnl-pivot-generate?job=${encodeURIComponent(jobId)}`, { method: "POST", headers: { Authorization: `Bearer ${publishableKey}`, apikey: publishableKey } });
       if (!generate.ok && generate.status !== 202) {
         const problem = await generate.json().catch(() => null) as { error?: string } | null;
@@ -276,7 +276,7 @@ export function PnlWorkspace() {
         if (!response.ok) throw new Error("생성된 Excel 파일을 가져오지 못했습니다.");
         const blob = await response.blob();
         const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = "P_L_Explorer_Pivot.xlsx"; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
-        setExportMessage("필터 적용 RAW 시트와 실제 PivotTable 시트를 내려받았습니다.");
+        setExportMessage("필터 적용 RAW 시트와 현재 행·열 구성의 일반 Excel 요약표를 내려받았습니다.");
         return;
       }
       setExportMessage("생성 요청은 처리 중입니다. 잠시 뒤 Excel 내려받기를 다시 눌러 주세요.");

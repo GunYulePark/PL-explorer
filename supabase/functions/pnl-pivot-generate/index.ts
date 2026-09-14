@@ -3,7 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import JSZip from "npm:jszip@3.10.1";
 
 const siteOrigin = "https://gunyulepark.github.io";
-const templateUrl = "https://raw.githubusercontent.com/GunYulePark/PL-explorer/main/assets/pnl-native-pivot-template.xlsx";
+const templateUrl = "https://raw.githubusercontent.com/GunYulePark/PL-explorer/main/assets/pnl-export-template.xlsx";
 const statementCodes = ["sales", "cogs", "gross_profit", "sga", "rnd", "operating_profit"];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const corsHeaders = {
@@ -28,21 +28,30 @@ function rawSheetXml(rows: Fact[], names: Map<string, string>) {
   }).join("")}</row>`).join("");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="A1:I${records.length}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="17.4"/><cols><col min="1" max="1" width="12" customWidth="1"/><col min="2" max="2" width="13" customWidth="1"/><col min="3" max="6" width="22" customWidth="1"/><col min="7" max="8" width="18" customWidth="1"/><col min="9" max="9" width="16" customWidth="1"/></cols><sheetData>${body}</sheetData><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><tableParts count="1"><tablePart r:id="rId1"/></tableParts></worksheet>`;
 }
-function pivotFieldIndexes(layout?: ExportRequest["layout"]) {
-  const indexFor: Record<string, number[]> = { "제품": [2], "브랜드": [3], "고객구분": [4], "사업장": [5], "손익 항목": [7], "측정치": [7], "기간": [0, 1] };
-  const selected = (labels: string[] | undefined) => (labels ?? []).flatMap((label) => indexFor[label] ?? []);
-  const rows = selected(layout?.rows); const columns = selected(layout?.columns);
-  const unique = (values: number[]) => values.filter((item, index) => values.indexOf(item) === index);
-  const rowFields = unique(rows);
-  const colFields = unique(columns.filter((item) => !rowFields.includes(item)));
-  return { rows: rowFields.length ? rowFields : [7], columns: colFields.length ? colFields : [0, 1] };
+type SummaryField = { key: "period" | "product_name" | "brand" | "customer_group_name" | "site_name" | "account_name"; label: string };
+const layoutField: Record<string, SummaryField[]> = {
+  "기간": [{ key: "period", label: "기간" }], "제품": [{ key: "product_name", label: "제품" }], "브랜드": [{ key: "brand", label: "브랜드" }],
+  "고객구분": [{ key: "customer_group_name", label: "고객구분" }], "사업장": [{ key: "site_name", label: "사업장" }], "손익 항목": [{ key: "account_name", label: "손익 항목" }], "측정치": [{ key: "account_name", label: "측정치" }],
+};
+function summaryFields(labels: string[] | undefined) { return (labels ?? []).flatMap((label) => layoutField[label] ?? []).filter((field, index, fields) => fields.findIndex((item) => item.key === field.key) === index); }
+function summaryValue(fact: Fact, names: Map<string, string>, key: SummaryField["key"]) {
+  if (key === "period") return fact.fiscal_year ? `${fact.fiscal_year}${fact.fiscal_quarter ? ` ${fact.fiscal_quarter}` : ""}` : "미지정";
+  if (key === "account_name") return names.get(fact.account_code) ?? fact.account_code;
+  return fact[key] || "미지정";
 }
-function pivotTableXml(layout?: ExportRequest["layout"]) {
-  const fields = pivotFieldIndexes(layout);
-  const fieldXml = Array.from({ length: 9 }, (_, index) => `<pivotField${fields.rows.includes(index) ? ' axis="axisRow"' : fields.columns.includes(index) ? ' axis="axisCol"' : index === 8 ? ' dataField="1"' : ""} showAll="0"/>`).join("");
-  const rows = fields.rows.map((field) => `<field x="${field}"/>`).join("");
-  const columns = fields.columns.map((field) => `<field x="${field}"/>`).join("");
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="PLPivot" cacheId="7" dataCaption="Values" updatedVersion="8" minRefreshableVersion="3" useAutoFormatting="1" createdVersion="8" refreshDataOnOpen="1"><location ref="A3:Z30" firstHeaderRow="1" firstDataRow="3" firstDataCol="1"/><pivotFields count="9">${fieldXml}</pivotFields><rowFields count="${fields.rows.length}">${rows}</rowFields><colFields count="${fields.columns.length}">${columns}</colFields><dataFields count="1"><dataField name="Amount Sum" fld="8" baseField="0" baseItem="0"/></dataFields><pivotTableStyleInfo name="PivotStyleLight16" showRowHeaders="1" showColHeaders="1" showRowStripes="0" showColStripes="0" showLastColumn="1"/></pivotTableDefinition>`;
+function summarySheetXml(facts: Fact[], names: Map<string, string>, layout?: ExportRequest["layout"]) {
+  const rowFields = summaryFields(layout?.rows); const columnFields = summaryFields(layout?.columns).filter((field) => !rowFields.some((row) => row.key === field.key));
+  const fields = [...(rowFields.length ? rowFields : [{ key: "account_name", label: "손익 항목" }]), ...(columnFields.length ? columnFields : [{ key: "period", label: "기간" }])];
+  const totals = new Map<string, { values: string[]; amount: number }>();
+  facts.forEach((fact) => { const values = fields.map((field) => summaryValue(fact, names, field.key)); const key = values.join("\u0001"); const current = totals.get(key) ?? { values, amount: 0 }; current.amount += Number(fact.amount); totals.set(key, current); });
+  const data = [...totals.values()].sort((left, right) => left.values.join("\u0001").localeCompare(right.values.join("\u0001"), "ko"));
+  const headers = [...fields.map((field) => field.label), "금액"];
+  const cell = (reference: string, value: unknown, numeric = false) => numeric ? `<c r="${reference}"><v>${escapeXml(value)}</v></c>` : `<c r="${reference}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`;
+  const title = `P/L Explorer 요약 · 행: ${(layout?.rows ?? []).join(" > ") || "손익 항목"} · 열: ${(layout?.columns ?? []).join(" > ") || "기간"}`;
+  const headerCells = headers.map((value, index) => cell(`${columnName(index + 1)}4`, value)).join("");
+  const body = data.map((row, index) => { const rowNumber = index + 5; return `<row r="${rowNumber}">${row.values.map((value, column) => cell(`${columnName(column + 1)}${rowNumber}`, value)).join("")}${cell(`${columnName(headers.length)}${rowNumber}`, row.amount, true)}</row>`; }).join("");
+  const lastColumn = columnName(headers.length); const lastRow = Math.max(4, data.length + 4);
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:${lastColumn}${lastRow}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="17.4"/><cols>${headers.map((_, index) => `<col min="${index + 1}" max="${index + 1}" width="22" customWidth="1"/>`).join("")}</cols><sheetData><row r="1">${cell("A1", title)}</row><row r="4">${headerCells}</row>${body}</sheetData><autoFilter ref="A4:${lastColumn}${lastRow}"/><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/></worksheet>`;
 }
 async function filteredFacts(admin: ReturnType<typeof createClient>, batchId: string, request: ExportRequest) {
   const facts: Fact[] = [];
@@ -80,19 +89,17 @@ Deno.serve(async (request) => {
       admin.from("pl_accounts").select("account_code,account_name"),
       fetch(templateUrl, { headers: { "Cache-Control": "no-cache" } }),
     ]);
-    if (!templateResponse.ok) throw new Error("Excel PivotTable 템플릿을 불러오지 못했습니다.");
+    if (!templateResponse.ok) throw new Error("Excel 템플릿을 불러오지 못했습니다.");
     const names = new Map((accounts.data ?? []).map((account) => [account.account_code, account.account_name]));
     const zip = await JSZip.loadAsync(await templateResponse.arrayBuffer());
     zip.file("xl/worksheets/sheet2.xml", rawSheetXml(facts, names));
+    zip.file("xl/worksheets/sheet1.xml", summarySheetXml(facts, names, ((job.request ?? {}) as ExportRequest).layout));
     const table = await zip.file("xl/tables/table1.xml")?.async("string");
-    const cache = await zip.file("xl/pivotCache/pivotCacheDefinition1.xml")?.async("string");
-    if (!table || !cache) throw new Error("Excel 템플릿 구성이 올바르지 않습니다.");
+    if (!table) throw new Error("Excel 템플릿 구성이 올바르지 않습니다.");
     const lastRow = facts.length + 1;
     zip.file("xl/tables/table1.xml", table.replaceAll(/ref="A1:I\d+"/g, `ref="A1:I${lastRow}"`));
-    zip.file("xl/pivotCache/pivotCacheDefinition1.xml", cache.replace(/refreshOnLoad="[^"]*"/, 'refreshOnLoad="1"').replace(/recordCount="[^"]*"/, `recordCount="${facts.length}"`));
-    zip.file("xl/pivotTables/pivotTable1.xml", pivotTableXml(((job.request ?? {}) as ExportRequest).layout));
     const output = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } });
-    const storagePath = `pivot/${jobId}.xlsx`; const filename = `P_L_Explorer_Pivot_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}.xlsx`;
+    const storagePath = `pivot/${jobId}.xlsx`; const filename = `P_L_Explorer_Export_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}.xlsx`;
     const { error: uploadError } = await admin.storage.from("pnl-exports").upload(storagePath, new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), { upsert: true, contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
     if (uploadError) throw new Error(uploadError.message);
     const { error: updateError } = await admin.from("pivot_export_jobs").update({ status: "completed", processed_at: new Date().toISOString(), result_storage_path: storagePath, result_filename: filename }).eq("id", jobId);

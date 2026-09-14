@@ -38,5 +38,3 @@ jobs:
           test -n "$SUPABASE_SECRET_KEY" || (echo "::error::SUPABASE_SECRET_KEY Repository secret is missing." && exit 1)
       - name: Ingest pending RAW batches
         run: python scripts/ingest_raw.py --process-pending --limit 3
-      - name: Generate pending native PivotTable exports
-        run: python scripts/generate_pivot_exports.py --process-pending --limit 1
