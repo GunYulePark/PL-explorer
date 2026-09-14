@@ -74,6 +74,22 @@ function excelValue(value: unknown): string | number | boolean | Date | null {
   }
   return String(value);
 }
+function rawText(value: unknown) { return String(value ?? "").trim(); }
+function rawYear(value: unknown) { return rawText(value).match(/(?:19|20)\d{2}/)?.[0] ?? ""; }
+function filterRawRows(rows: Array<Array<string | number | boolean | Date | null>>, filters: FilterState) {
+  if (!rows.length) return rows;
+  const hasYearFilter = filters.selectedYears.length > 0 || Boolean(filters.yearFrom) || Boolean(filters.yearTo);
+  const matches = (values: string[], value: unknown) => !values.length || values.includes(rawText(value));
+  return [rows[0], ...rows.slice(1).filter((row) => {
+    if (!row.some((value) => rawText(value))) return false;
+    const year = rawYear(row[0]);
+    if (filters.selectedYears.length && !filters.selectedYears.includes(year)) return false;
+    if (hasYearFilter && !year) return false;
+    if (filters.yearFrom && Number(year) < Number(filters.yearFrom)) return false;
+    if (filters.yearTo && Number(year) > Number(filters.yearTo)) return false;
+    return matches(filters.product, row[7]) && matches(filters.brand, row[8]) && matches(filters.customer, row[14]) && matches(filters.site, row[19]);
+  })];
+}
 function spacedExamples(values: Array<string | number | null | undefined>, fallback: string[]) {
   const unique = [...new Set(values.filter((value): value is string | number => value !== null && value !== undefined && String(value).trim() !== "").map(String))].sort((left, right) => left.localeCompare(right, "ko"));
   if (unique.length < 3) return unique.length ? unique : fallback;
@@ -294,15 +310,19 @@ export function PnlWorkspace() {
       const ExcelJS = await import("exceljs");
       const workbook = new ExcelJS.Workbook();
       const rawSheet = workbook.addWorksheet("RAW", { views: [{ state: "frozen", ySplit: 1 }] });
-      if (/\.csv$/i.test(sourceFilename)) rawSheet.addRows(parseCsvRows(await sourceBlob.text()));
+      let sourceRows: Array<Array<string | number | boolean | Date | null>>;
+      if (/\.csv$/i.test(sourceFilename)) sourceRows = parseCsvRows(await sourceBlob.text());
       else {
         const sourceWorkbook = new ExcelJS.Workbook();
         await sourceWorkbook.xlsx.load(await sourceBlob.arrayBuffer());
         const sourceSheet = sourceWorkbook.worksheets[0];
         if (!sourceSheet) throw new Error("원본 XLSX에서 첫 번째 시트를 찾을 수 없습니다.");
         const sourceColumns = Math.max(sourceSheet.actualColumnCount, 1);
-        sourceSheet.eachRow({ includeEmpty: true }, (row) => rawSheet.addRow(Array.from({ length: sourceColumns }, (_, index) => excelValue(row.getCell(index + 1).value))));
+        sourceRows = [];
+        sourceSheet.eachRow({ includeEmpty: true }, (row) => sourceRows.push(Array.from({ length: sourceColumns }, (_, index) => excelValue(row.getCell(index + 1).value))));
       }
+      const filteredRawRows = filterRawRows(sourceRows, filters);
+      rawSheet.addRows(filteredRawRows);
       if (rawSheet.rowCount > 0 && rawSheet.actualColumnCount > 0) {
         rawSheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
         rawSheet.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF244B93" } };
@@ -310,7 +330,7 @@ export function PnlWorkspace() {
       }
       rawSheet.columns.forEach((column) => { column.width = 16; });
 
-      const pivotSheet = workbook.addWorksheet("피벗테이블", { views: [{ state: "frozen", ySplit: 5 }] });
+      const pivotSheet = workbook.addWorksheet("피벗테이블", { views: [{ state: "frozen", ySplit: 6 }] });
       const rowHeaders = activeBreakdownDimensions.length ? activeBreakdownDimensions.map((dimension) => dimension.label) : ["구분"];
       const pivotHeader = [...rowHeaders, "손익 항목", ...displayPeriods.map((period) => period.label)];
       pivotSheet.addRow(["P/L Explorer 피벗테이블"]);
@@ -319,6 +339,7 @@ export function PnlWorkspace() {
       pivotSheet.addRow(["데이터베이스", datasetName]);
       pivotSheet.addRow(["행 구성", layout.rows.join(" > ") || "없음"]);
       pivotSheet.addRow(["기간", displayPeriods.map((period) => period.label).join(", ")]);
+      pivotSheet.addRow(["RAW 행 수", Math.max(filteredRawRows.length - 1, 0)]);
       pivotSheet.addRow([]);
       const headerRow = pivotSheet.addRow(pivotHeader);
       headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
@@ -330,11 +351,11 @@ export function PnlWorkspace() {
       ])));
       pivotSheet.columns.forEach((column, index) => { column.width = index < pivotHeader.length - displayPeriods.length ? 18 : 16; });
       for (let column = pivotHeader.length - displayPeriods.length + 1; column <= pivotHeader.length; column += 1) pivotSheet.getColumn(column).numFmt = "#,##0";
-      pivotSheet.autoFilter = `A6:${columnName(pivotHeader.length)}${pivotSheet.rowCount}`;
+      pivotSheet.autoFilter = `A7:${columnName(pivotHeader.length)}${pivotSheet.rowCount}`;
       const buffer = await workbook.xlsx.writeBuffer();
       const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `손익_${datasetName}_${yearRange}.xlsx`; anchor.click(); URL.revokeObjectURL(url);
-      setExportMessage("RAW와 피벗테이블 시트가 포함된 Excel 파일을 내려받았습니다.");
+      setExportMessage(`필터 적용 RAW ${Math.max(filteredRawRows.length - 1, 0).toLocaleString("ko-KR")}행과 피벗테이블 시트가 포함된 Excel 파일을 내려받았습니다.`);
     } catch (error) { setExportMessage(`Excel 생성 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`); }
     finally { setExporting(false); }
   }
