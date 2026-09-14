@@ -6,6 +6,7 @@ import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import { statementOrder, type StatementCode, type StatementRow } from "@/lib/types";
 
 type Axis = "rows" | "columns";
+type AppTab = "analysis" | "guide";
 type DraggedAxisItem = { axis: Axis; item: string };
 type FilterState = { dataset: string; yearFrom: string; yearTo: string; selectedYears: string[]; product: string[]; brand: string[]; customer: string[]; site: string[] };
 type LayoutConfig = { rows: string[]; columns: string[]; filters: string[] };
@@ -77,10 +78,23 @@ function PivotFilter({ label, values, selected, onChange }: { label: string; val
   return <div className="pivot-filter"><span>{label}</span><button type="button" className="pivot-filter-trigger" onClick={() => setOpen((current) => !current)}>{selected.length ? `${selected.length}개 선택` : "전체"}<b>⌄</b></button>{open && <div className="pivot-popover"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`${label} 검색`} /><div className="pivot-options"><label className="pivot-option-all"><input type="checkbox" checked={allVisibleSelected} disabled={!visible.length} onChange={toggleAllVisible} /><span>모두</span></label>{visible.length ? visible.map((value) => <label key={value}><input type="checkbox" checked={selected.includes(value)} onChange={() => toggle(value)} /><span>{value}</span></label>) : <p>일치하는 선택지가 없습니다.</p>}</div></div>}</div>;
 }
 
+function UsageGuide({ onStartAnalysis }: { onStartAnalysis: () => void }) {
+  return <section className="usage-guide" aria-labelledby="usage-guide-title">
+    <div className="guide-hero"><div><p>처음 사용하시나요?</p><h1 id="usage-guide-title">3단계로 손익을 조회하세요</h1><span>파일 하나를 기준으로 원하는 행·열 배치와 필터를 적용한 뒤, 화면 또는 Excel로 확인합니다.</span></div><button type="button" onClick={onStartAnalysis}>손익 분석 시작</button></div>
+    <div className="guide-steps">
+      <article className="guide-step"><div className="guide-step-number">1</div><div className="guide-step-visual upload-visual"><div className="mini-title">RAW 업로드</div><div className="mini-file"><b>손익_전체.xlsx</b><span>XLSX 또는 CSV</span></div><div className="mini-primary">업로드 및 적재</div></div><div><h2>원본 파일을 올립니다</h2><p>하단의 RAW 업로드에서 XLSX 또는 CSV를 선택합니다. 적재가 끝나면 파일명으로 데이터베이스가 만들어집니다.</p></div></article>
+      <article className="guide-step"><div className="guide-step-number">2</div><div className="guide-step-visual filter-visual"><div className="mini-label">데이터베이스</div><div className="mini-select">가장 최근 업로드 파일 <b>⌄</b></div><div className="mini-filter-row"><span>브랜드</span><span>기간</span><span>제품</span></div></div><div><h2>파일 하나와 조건을 고릅니다</h2><p>처음에는 가장 최근 적재 파일이 선택됩니다. 브랜드·제품·고객구분과 기간을 골라 필요한 데이터만 조회합니다.</p></div></article>
+      <article className="guide-step"><div className="guide-step-number">3</div><div className="guide-step-visual layout-visual"><div className="mini-axis"><span>행</span><b>브랜드</b><b>손익 항목</b></div><div className="mini-axis"><span>열</span><b>기간</b></div><div className="mini-download">Excel 내려받기</div></div><div><h2>프리셋 적용 후 결과를 받습니다</h2><p>추천 프리셋을 선택하거나 행·열 항목을 끌어 배치합니다. 화면 미리보기와 같은 조건의 RAW·Summary Excel을 내려받을 수 있습니다.</p></div></article>
+    </div>
+    <div className="guide-note"><strong>알아두세요</strong><span>Summary의 금액은 선택한 필터를 적용한 RAW의 <code>amount</code>를, 선택한 행·열 그룹별로 합산한 값입니다.</span></div>
+  </section>;
+}
+
 export function PnlWorkspace() {
   const configuredClient = getSupabaseBrowserClient();
   const hasClient = Boolean(configuredClient);
   const [filters, setFilters] = useState<FilterState>(initialFilters);
+  const [activeTab, setActiveTab] = useState<AppTab>("analysis");
   const [filterOptions, setFilterOptions] = useState(sampleFilters);
   const [rows, setRows] = useState<StatementRow[]>(sampleStatementRows);
   const [matrixRows, setMatrixRows] = useState<MatrixRecord[]>([]);
@@ -318,8 +332,8 @@ export function PnlWorkspace() {
   ];
 
   return <main className="analysis-app">
-    <header className="analysis-topbar"><div className="analysis-logo">P/L<span>EXPLORER</span></div><nav><button className="topnav-active">손익 분석</button></nav><div className="topbar-actions"><span className={hasClient ? "status-dot live" : "status-dot"} />{hasClient ? "공개 체험" : "테스트 모드"}</div></header>
-    <div className="analysis-shell">
+    <header className="analysis-topbar"><div className="analysis-logo">P/L<span>EXPLORER</span></div><nav><button type="button" className={activeTab === "analysis" ? "topnav-active" : ""} onClick={() => setActiveTab("analysis")}>손익 분석</button><button type="button" className={activeTab === "guide" ? "topnav-active" : ""} onClick={() => setActiveTab("guide")}>사용 방법</button></nav><div className="topbar-actions"><span className={hasClient ? "status-dot live" : "status-dot"} />{hasClient ? "공개 체험" : "테스트 모드"}</div></header>
+    {activeTab === "guide" ? <UsageGuide onStartAnalysis={() => setActiveTab("analysis")} /> : <div className="analysis-shell">
       <aside className="field-palette"><h1>손익 분석</h1><p>추천 프리셋부터 적용한 뒤 필요한 항목만 조정하세요.</p><div className="preset-strip"><div className="preset-heading"><span>추천 기본 프리셋</span><small>가장 빠른 시작 방법</small></div><div className="preset-grid">{systemPresets.map((preset, index) => <button key={preset.id} className={`preset preset-${index + 1}${activePreset?.id === preset.id ? " active" : ""}`} onClick={() => applyPreset(preset)}><b>{preset.name}</b><small>{preset.description}</small><em>{activePreset?.id === preset.id ? "적용 중" : "바로 적용"}</em></button>)}</div>{presetMessage && <p className="preset-message">{presetMessage}</p>}</div><input className="palette-search" value={paletteSearch} onChange={(event) => setPaletteSearch(event.target.value)} placeholder="항목 검색" />
         <div className="field-grid">{palette.map((item) => <div className="field-option" key={item}><button onClick={() => addToAxis(item)} aria-describedby={`examples-${item}`}><i>⋮⋮</i>{item}</button><div className="field-tooltip" id={`examples-${item}`} role="tooltip"><small>예시 값 · 25% / 50% / 75% 구간</small>{(fieldExamples[item] ?? initialFieldExamples[item]).map((example) => <span key={example}>{example}</span>)}</div></div>)}</div>
         <div className="export-action"><div className="run-row"><button className="reset-button" onClick={() => setLayout(systemPresets[0].config)} title="기본 설정으로 되돌리기">↻</button><button className="run-button" onClick={downloadExcel} disabled={exporting}>{exporting ? "Excel 생성 중…" : "Excel 내려받기"} <span>⌄</span></button></div>{exportMessage && <p className="export-message" role="status">{exportMessage}</p>}</div>
@@ -336,6 +350,6 @@ export function PnlWorkspace() {
       </section>
 
       <aside className="selection-panel"><div className="selection-title"><div><strong>선택된 항목</strong><small>⋮⋮ 손잡이를 끌어 순서·행/열 변경</small></div><span>{layout.rows.length + layout.columns.length}개</span></div><div className="selection-group" onDragOver={(event) => allowAxisDrop(event, "rows")} onDrop={(event) => finishAxisDrop(event, "rows")}><h3>행 [{layout.rows.length}]</h3>{layout.rows.map((item) => <div className={draggedItem?.item === item ? "selected-item dragging" : "selected-item"} key={`row-${item}`} draggable onDragStart={(event) => startAxisDrag(event, "rows", item)} onDragEnd={endAxisDrag} onDragOver={(event) => allowAxisDrop(event, "rows")} onDrop={(event) => finishAxisDrop(event, "rows", item)}><span>⋮⋮ {item}</span><button onClick={() => moveAxisItem("rows", item, -1)}>↑</button><button onClick={() => moveAxisItem("rows", item, 1)}>↓</button><button onClick={() => removeFromAxis("rows", item)}>×</button></div>)}</div><div className="selection-group" onDragOver={(event) => allowAxisDrop(event, "columns")} onDrop={(event) => finishAxisDrop(event, "columns")}><h3>열 [{layout.columns.length}]</h3>{layout.columns.map((item) => <div className={draggedItem?.item === item ? "selected-item dragging" : "selected-item"} key={`column-${item}`} draggable onDragStart={(event) => startAxisDrag(event, "columns", item)} onDragEnd={endAxisDrag} onDragOver={(event) => allowAxisDrop(event, "columns")} onDrop={(event) => finishAxisDrop(event, "columns", item)}><span>⋮⋮ {item}</span><button onClick={() => moveAxisItem("columns", item, -1)}>↑</button><button onClick={() => moveAxisItem("columns", item, 1)}>↓</button><button onClick={() => removeFromAxis("columns", item)}>×</button></div>)}</div><div className="recommended-presets"><h3>기본 프리셋으로 빠르게 시작</h3><p>색상 카드를 선택하면 권장 행·열 구성이 즉시 적용됩니다.</p>{systemPresets.map((preset) => <button key={preset.id} onClick={() => applyPreset(preset)}><span>기본</span>{preset.name}</button>)}</div></aside>
-    </div>
+    </div>}
   </main>;
 }
