@@ -119,6 +119,7 @@ export function PnlWorkspace() {
   const [file, setFile] = useState<File | null>(null);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
   const yearDragStart = useRef<string | null>(null);
   const suppressYearClick = useRef(false);
   const activeBreakdownDimensions = useMemo(() => breakdownDimensions.filter((dimension) => layout.rows.includes(dimension.label)), [layout.rows]);
@@ -272,8 +273,8 @@ export function PnlWorkspace() {
   function swapAxes() { setLayout((current) => ({ ...current, rows: current.columns, columns: current.rows })); setActiveAxis((current) => current === "rows" ? "columns" : "rows"); }
   function applyPreset(preset: SavedPreset) { setLayout(ensureConfig(preset.config)); setPresetMessage(`‘${preset.name}’ 설정을 적용했습니다.`); }
   async function downloadExcel() {
-    if (!file) { setUploadMessage("RAW 시트를 포함하려면 먼저 원본 XLSX 또는 CSV 파일을 선택하세요."); return; }
-    setExporting(true); setUploadMessage(null);
+    if (!file) { setExportMessage("먼저 아래 RAW 업로드 영역에서 원본 XLSX 또는 CSV 파일을 선택하세요."); return; }
+    setExporting(true); setExportMessage(null); setUploadMessage(null);
     const datasetName = filters.dataset === "전체" ? "전체" : datasets.find((dataset) => dataset.id === filters.dataset)?.name ?? "선택 데이터베이스";
     const yearRange = filters.selectedYears.length ? filters.selectedYears.sort().join(", ") : `${filters.yearFrom || "전체"}~${filters.yearTo || "전체"}`;
     try {
@@ -320,11 +321,11 @@ export function PnlWorkspace() {
       const buffer = await workbook.xlsx.writeBuffer();
       const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `손익_${datasetName}_${yearRange}.xlsx`; anchor.click(); URL.revokeObjectURL(url);
-      setUploadMessage("RAW와 피벗테이블 시트가 포함된 Excel 파일을 내려받았습니다.");
-    } catch (error) { setUploadMessage(`Excel 생성 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`); }
+      setExportMessage("RAW와 피벗테이블 시트가 포함된 Excel 파일을 내려받았습니다.");
+    } catch (error) { setExportMessage(`Excel 생성 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`); }
     finally { setExporting(false); }
   }
-  function selectFile(event: ChangeEvent<HTMLInputElement>) { setFile(event.target.files?.[0] ?? null); setUploadMessage(null); }
+  function selectFile(event: ChangeEvent<HTMLInputElement>) { setFile(event.target.files?.[0] ?? null); setUploadMessage(null); setExportMessage(null); }
   async function uploadRaw() {
     if (!configuredClient || !file) { setUploadMessage(file ? "Supabase 연결 정보를 설정한 뒤 업로드할 수 있습니다." : "업로드할 XLSX 또는 CSV 파일을 선택하세요."); return; }
     if (!/\.(xlsx|csv)$/i.test(file.name)) { setUploadMessage("XLSX 또는 CSV 파일만 업로드할 수 있습니다."); return; }
@@ -349,7 +350,7 @@ export function PnlWorkspace() {
     <div className="analysis-shell">
       <aside className="field-palette"><h1>손익 분석</h1><p>추천 프리셋부터 적용한 뒤 필요한 항목만 조정하세요.</p><div className="preset-strip"><div className="preset-heading"><span>추천 기본 프리셋</span><small>가장 빠른 시작 방법</small></div><div className="preset-grid">{systemPresets.map((preset, index) => <button key={preset.id} className={`preset preset-${index + 1}${activePreset?.id === preset.id ? " active" : ""}`} onClick={() => applyPreset(preset)}><b>{preset.name}</b><small>{preset.description}</small><em>{activePreset?.id === preset.id ? "적용 중" : "바로 적용"}</em></button>)}</div>{presetMessage && <p className="preset-message">{presetMessage}</p>}</div><input className="palette-search" value={paletteSearch} onChange={(event) => setPaletteSearch(event.target.value)} placeholder="항목 검색" />
         <div className="field-grid">{palette.map((item) => <div className="field-option" key={item}><button onClick={() => addToAxis(item)} aria-describedby={`examples-${item}`}><i>⋮⋮</i>{item}</button><div className="field-tooltip" id={`examples-${item}`} role="tooltip"><small>예시 값 · 25% / 50% / 75% 구간</small>{(fieldExamples[item] ?? initialFieldExamples[item]).map((example) => <span key={example}>{example}</span>)}</div></div>)}</div>
-        <div className="run-row"><button className="reset-button" onClick={() => setLayout(systemPresets[0].config)} title="기본 설정으로 되돌리기">↻</button><button className="run-button" onClick={downloadExcel} disabled={exporting}>{exporting ? "Excel 생성 중…" : "Excel 내려받기"} <span>⌄</span></button></div>
+        <div className="export-action"><div className="run-row"><button className="reset-button" onClick={() => setLayout(systemPresets[0].config)} title="기본 설정으로 되돌리기">↻</button><button className="run-button" onClick={downloadExcel} disabled={exporting}>{exporting ? "Excel 생성 중…" : "Excel 내려받기"} <span>⌄</span></button></div>{exportMessage && <p className="export-message" role="status">{exportMessage}</p>}</div>
       </aside>
 
       <section className="builder-area">
