@@ -256,16 +256,21 @@ export function PnlWorkspace() {
         p_year_to: filters.selectedYears.length ? null : (filters.yearTo ? Number(filters.yearTo) : null),
         p_products: filters.product.length ? filters.product : null, p_brands: filters.brand.length ? filters.brand : null,
         p_customers: filters.customer.length ? filters.customer : null, p_sites: filters.site.length ? filters.site : null,
+        p_layout: { rows: layout.rows, columns: layout.columns },
       });
       if (requestError || !jobId) throw new Error(requestError?.message ?? "Excel 생성 요청을 등록하지 못했습니다.");
-      setExportMessage("필터 적용 RAW와 실제 PivotTable을 서버에서 생성 중입니다. 보통 5분 이내에 자동으로 내려받습니다…");
-      const deadline = Date.now() + 8 * 60 * 1000;
+      setExportMessage("필터 적용 RAW와 실제 PivotTable을 서버에서 즉시 생성 중입니다…");
+      const generate = await fetch(`${supabaseUrl}/functions/v1/pnl-pivot-generate?job=${encodeURIComponent(jobId)}`, { method: "POST", headers: { Authorization: `Bearer ${publishableKey}`, apikey: publishableKey } });
+      if (!generate.ok && generate.status !== 202) {
+        const problem = await generate.json().catch(() => null) as { error?: string } | null;
+        throw new Error(problem?.error ?? "서버 Excel 생성을 시작하지 못했습니다.");
+      }
+      const deadline = Date.now() + 90 * 1000;
       while (Date.now() < deadline) {
-        await new Promise((resolve) => window.setTimeout(resolve, 10_000));
         const { data: statusRows, error: statusError } = await configuredClient.rpc("pnl_pivot_export_status", { p_job_id: jobId });
         if (statusError) throw new Error(statusError.message);
         const status = (statusRows as Array<{ status: string; error_message: string | null }> | null)?.[0];
-        if (!status || status.status === "queued" || status.status === "processing") continue;
+        if (!status || status.status === "queued" || status.status === "processing") { await new Promise((resolve) => window.setTimeout(resolve, 2_000)); continue; }
         if (status.status === "failed") throw new Error(status.error_message ?? "서버 Excel 생성에 실패했습니다.");
         const response = await fetch(`${supabaseUrl}/functions/v1/pnl-pivot-download?job=${encodeURIComponent(jobId)}`, { headers: { Authorization: `Bearer ${publishableKey}`, apikey: publishableKey } });
         if (!response.ok) throw new Error("생성된 Excel 파일을 가져오지 못했습니다.");
@@ -274,7 +279,7 @@ export function PnlWorkspace() {
         setExportMessage("필터 적용 RAW 시트와 실제 PivotTable 시트를 내려받았습니다.");
         return;
       }
-      setExportMessage("생성 요청은 접수되었습니다. 작업이 끝나면 Excel 내려받기를 다시 눌러 주세요.");
+      setExportMessage("생성 요청은 처리 중입니다. 잠시 뒤 Excel 내려받기를 다시 눌러 주세요.");
     } catch (error) { setExportMessage(`Excel 생성 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`); }
     finally { setExporting(false); }
   }

@@ -1,0 +1,106 @@
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "npm:@supabase/supabase-js@2";
+import JSZip from "npm:jszip@3.10.1";
+
+const siteOrigin = "https://gunyulepark.github.io";
+const templateUrl = "https://raw.githubusercontent.com/GunYulePark/PL-explorer/main/assets/pnl-native-pivot-template.xlsx";
+const statementCodes = ["sales", "cogs", "gross_profit", "sga", "rnd", "operating_profit"];
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const corsHeaders = {
+  "Access-Control-Allow-Origin": siteOrigin,
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Vary": "Origin",
+};
+
+type ExportRequest = { years?: number[]; year_from?: number | null; year_to?: number | null; products?: string[]; brands?: string[]; customers?: string[]; sites?: string[]; layout?: { rows?: string[]; columns?: string[] } };
+type Fact = { fiscal_year: number | null; fiscal_quarter: string | null; product_name: string | null; brand: string | null; customer_group_name: string | null; site_name: string | null; account_code: string; amount: number | string };
+
+function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" } }); }
+function escapeXml(value: unknown) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;"); }
+function columnName(column: number) { let name = ""; for (let current = column; current > 0; current = Math.floor((current - 1) / 26)) name = String.fromCharCode(65 + ((current - 1) % 26)) + name; return name; }
+function rawSheetXml(rows: Fact[], names: Map<string, string>) {
+  const headers = ["fiscal_year", "fiscal_quarter", "product_name", "brand", "customer_group_name", "site_name", "account_code", "account_name", "amount"];
+  const records = [headers, ...rows.map((fact) => [fact.fiscal_year, fact.fiscal_quarter, fact.product_name, fact.brand, fact.customer_group_name, fact.site_name, fact.account_code, names.get(fact.account_code) ?? fact.account_code, fact.amount])];
+  const body = records.map((values, rowIndex) => `<row r="${rowIndex + 1}" spans="1:9">${values.map((value, index) => {
+    const cell = `${columnName(index + 1)}${rowIndex + 1}`;
+    return rowIndex > 0 && (index === 0 || index === 8) && value !== null && value !== "" ? `<c r="${cell}"><v>${escapeXml(value)}</v></c>` : `<c r="${cell}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`;
+  }).join("")}</row>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="A1:I${records.length}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="17.4"/><cols><col min="1" max="1" width="12" customWidth="1"/><col min="2" max="2" width="13" customWidth="1"/><col min="3" max="6" width="22" customWidth="1"/><col min="7" max="8" width="18" customWidth="1"/><col min="9" max="9" width="16" customWidth="1"/></cols><sheetData>${body}</sheetData><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><tableParts count="1"><tablePart r:id="rId1"/></tableParts></worksheet>`;
+}
+function pivotFieldIndexes(layout?: ExportRequest["layout"]) {
+  const indexFor: Record<string, number[]> = { "제품": [2], "브랜드": [3], "고객구분": [4], "사업장": [5], "손익 항목": [7], "측정치": [7], "기간": [0, 1] };
+  const selected = (labels: string[] | undefined) => (labels ?? []).flatMap((label) => indexFor[label] ?? []);
+  const rows = selected(layout?.rows); const columns = selected(layout?.columns);
+  const unique = (values: number[]) => values.filter((item, index) => values.indexOf(item) === index);
+  const rowFields = unique(rows);
+  const colFields = unique(columns.filter((item) => !rowFields.includes(item)));
+  return { rows: rowFields.length ? rowFields : [7], columns: colFields.length ? colFields : [0, 1] };
+}
+function pivotTableXml(layout?: ExportRequest["layout"]) {
+  const fields = pivotFieldIndexes(layout);
+  const fieldXml = Array.from({ length: 9 }, (_, index) => `<pivotField${fields.rows.includes(index) ? ' axis="axisRow"' : fields.columns.includes(index) ? ' axis="axisCol"' : index === 8 ? ' dataField="1"' : ""} showAll="0"/>`).join("");
+  const rows = fields.rows.map((field) => `<field x="${field}"/>`).join("");
+  const columns = fields.columns.map((field) => `<field x="${field}"/>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="PLPivot" cacheId="7" dataCaption="Values" updatedVersion="8" minRefreshableVersion="3" useAutoFormatting="1" createdVersion="8" refreshDataOnOpen="1"><location ref="A3:Z30" firstHeaderRow="1" firstDataRow="3" firstDataCol="1"/><pivotFields count="9">${fieldXml}</pivotFields><rowFields count="${fields.rows.length}">${rows}</rowFields><colFields count="${fields.columns.length}">${columns}</colFields><dataFields count="1"><dataField name="Amount Sum" fld="8" baseField="0" baseItem="0"/></dataFields><pivotTableStyleInfo name="PivotStyleLight16" showRowHeaders="1" showColHeaders="1" showRowStripes="0" showColStripes="0" showLastColumn="1"/></pivotTableDefinition>`;
+}
+async function filteredFacts(admin: ReturnType<typeof createClient>, batchId: string, request: ExportRequest) {
+  const facts: Fact[] = [];
+  for (let offset = 0; ; offset += 1000) {
+    let query = admin.from("pl_facts").select("fiscal_year,fiscal_quarter,product_name,brand,customer_group_name,site_name,account_code,amount").eq("import_batch_id", batchId).in("account_code", statementCodes).order("source_row_number").order("account_code").range(offset, offset + 999);
+    if (request.years?.length) query = query.in("fiscal_year", request.years);
+    else { if (request.year_from) query = query.gte("fiscal_year", request.year_from); if (request.year_to) query = query.lte("fiscal_year", request.year_to); }
+    if (request.products?.length) query = query.in("product_name", request.products);
+    if (request.brands?.length) query = query.in("brand", request.brands);
+    if (request.customers?.length) query = query.in("customer_group_name", request.customers);
+    if (request.sites?.length) query = query.in("site_name", request.sites);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    facts.push(...(data as Fact[] ?? []));
+    if (!data || data.length < 1000) return facts;
+  }
+}
+
+Deno.serve(async (request) => {
+  if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (request.method !== "POST" || request.headers.get("origin") !== siteOrigin) return json({ error: "허용되지 않은 요청입니다." }, 403);
+  const jobId = new URL(request.url).searchParams.get("job") ?? "";
+  if (!uuid.test(jobId)) return json({ error: "유효하지 않은 내보내기 요청입니다." }, 400);
+  const keys = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") ?? "{}"); const serviceKey = keys.default ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"); const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  if (!serviceKey || !supabaseUrl) return json({ error: "서버 설정이 완료되지 않았습니다." }, 500);
+  const admin = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const { data: job, error: jobError } = await admin.from("pivot_export_jobs").select("id,import_batch_id,request,status").eq("id", jobId).maybeSingle();
+  if (jobError || !job) return json({ error: "내보내기 요청을 찾을 수 없습니다." }, 404);
+  if (job.status === "completed") return json({ status: "completed" });
+  const { data: claimed } = await admin.from("pivot_export_jobs").update({ status: "processing", error_message: null }).eq("id", jobId).eq("status", "queued").select("id");
+  if (!claimed?.length) return json({ status: job.status }, 202);
+  try {
+    const [facts, accounts, templateResponse] = await Promise.all([
+      filteredFacts(admin, job.import_batch_id, (job.request ?? {}) as ExportRequest),
+      admin.from("pl_accounts").select("account_code,account_name"),
+      fetch(templateUrl, { headers: { "Cache-Control": "no-cache" } }),
+    ]);
+    if (!templateResponse.ok) throw new Error("Excel PivotTable 템플릿을 불러오지 못했습니다.");
+    const names = new Map((accounts.data ?? []).map((account) => [account.account_code, account.account_name]));
+    const zip = await JSZip.loadAsync(await templateResponse.arrayBuffer());
+    zip.file("xl/worksheets/sheet2.xml", rawSheetXml(facts, names));
+    const table = await zip.file("xl/tables/table1.xml")?.async("string");
+    const cache = await zip.file("xl/pivotCache/pivotCacheDefinition1.xml")?.async("string");
+    if (!table || !cache) throw new Error("Excel 템플릿 구성이 올바르지 않습니다.");
+    const lastRow = facts.length + 1;
+    zip.file("xl/tables/table1.xml", table.replaceAll(/ref="A1:I\d+"/g, `ref="A1:I${lastRow}"`));
+    zip.file("xl/pivotCache/pivotCacheDefinition1.xml", cache.replace(/refreshOnLoad="[^"]*"/, 'refreshOnLoad="1"').replace(/recordCount="[^"]*"/, `recordCount="${facts.length}"`));
+    zip.file("xl/pivotTables/pivotTable1.xml", pivotTableXml(((job.request ?? {}) as ExportRequest).layout));
+    const output = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } });
+    const storagePath = `pivot/${jobId}.xlsx`; const filename = `P_L_Explorer_Pivot_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "")}.xlsx`;
+    const { error: uploadError } = await admin.storage.from("pnl-exports").upload(storagePath, new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), { upsert: true, contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    if (uploadError) throw new Error(uploadError.message);
+    const { error: updateError } = await admin.from("pivot_export_jobs").update({ status: "completed", processed_at: new Date().toISOString(), result_storage_path: storagePath, result_filename: filename }).eq("id", jobId);
+    if (updateError) throw new Error(updateError.message);
+    return json({ status: "completed", rows: facts.length });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    await admin.from("pivot_export_jobs").update({ status: "failed", processed_at: new Date().toISOString(), error_message: message.slice(0, 1000) }).eq("id", jobId);
+    return json({ error: message }, 500);
+  }
+});
