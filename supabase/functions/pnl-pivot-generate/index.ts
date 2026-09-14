@@ -39,7 +39,17 @@ function summaryValue(fact: Fact, names: Map<string, string>, key: SummaryField[
   if (key === "account_name") return names.get(fact.account_code) ?? fact.account_code;
   return fact[key] || "미지정";
 }
-function summarySheetXml(facts: Fact[], names: Map<string, string>, layout?: ExportRequest["layout"]) {
+function selectedFilterSummary(request: ExportRequest) {
+  const parts: string[] = [];
+  if (request.years?.length) parts.push(`개별 연도 ${request.years.join(", ")}`);
+  else if (request.year_from || request.year_to) parts.push(`기간 ${request.year_from ?? "처음"}~${request.year_to ?? "끝"}`);
+  for (const [label, values] of [["제품", request.products], ["브랜드", request.brands], ["고객구분", request.customers], ["사업장", request.sites]] as const) {
+    if (values?.length) parts.push(`${label} ${values.join(", ")}`);
+  }
+  return parts.length ? parts.join(" / ") : "추가 필터 없음";
+}
+function summarySheetXml(facts: Fact[], names: Map<string, string>, request: ExportRequest) {
+  const layout = request.layout;
   const rowFields = summaryFields(layout?.rows); const columnFields = summaryFields(layout?.columns).filter((field) => !rowFields.some((row) => row.key === field.key));
   const fields = [...(rowFields.length ? rowFields : [{ key: "account_name", label: "손익 항목" }]), ...(columnFields.length ? columnFields : [{ key: "period", label: "기간" }])];
   const totals = new Map<string, { values: string[]; amount: number }>();
@@ -47,11 +57,15 @@ function summarySheetXml(facts: Fact[], names: Map<string, string>, layout?: Exp
   const data = [...totals.values()].sort((left, right) => left.values.join("\u0001").localeCompare(right.values.join("\u0001"), "ko"));
   const headers = [...fields.map((field) => field.label), "금액"];
   const cell = (reference: string, value: unknown, numeric = false) => numeric ? `<c r="${reference}"><v>${escapeXml(value)}</v></c>` : `<c r="${reference}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`;
-  const title = `P/L Explorer 요약 · 행: ${(layout?.rows ?? []).join(" > ") || "손익 항목"} · 열: ${(layout?.columns ?? []).join(" > ") || "기간"}`;
-  const headerCells = headers.map((value, index) => cell(`${columnName(index + 1)}4`, value)).join("");
-  const body = data.map((row, index) => { const rowNumber = index + 5; return `<row r="${rowNumber}">${row.values.map((value, column) => cell(`${columnName(column + 1)}${rowNumber}`, value)).join("")}${cell(`${columnName(headers.length)}${rowNumber}`, row.amount, true)}</row>`; }).join("");
-  const lastColumn = columnName(headers.length); const lastRow = Math.max(4, data.length + 4);
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:${lastColumn}${lastRow}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="17.4"/><cols>${headers.map((_, index) => `<col min="${index + 1}" max="${index + 1}" width="22" customWidth="1"/>`).join("")}</cols><sheetData><row r="1">${cell("A1", title)}</row><row r="4">${headerCells}</row>${body}</sheetData><autoFilter ref="A4:${lastColumn}${lastRow}"/><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/></worksheet>`;
+  const rowBasis = (rowFields.length ? rowFields : [{ label: "손익 항목" }]).map((field) => field.label).join(" > ");
+  const columnBasis = (columnFields.length ? columnFields : [{ label: "기간" }]).map((field) => field.label).join(" > ");
+  const title = "P/L Explorer 요약";
+  const aggregation = `합계 기준: 필터 적용 후 RAW 시트의 amount를 합산하며, 같은 행·열 기준 조합은 한 행으로 집계합니다.`;
+  const headerRow = 7;
+  const headerCells = headers.map((value, index) => cell(`${columnName(index + 1)}${headerRow}`, value)).join("");
+  const body = data.map((row, index) => { const rowNumber = index + headerRow + 1; return `<row r="${rowNumber}">${row.values.map((value, column) => cell(`${columnName(column + 1)}${rowNumber}`, value)).join("")}${cell(`${columnName(headers.length)}${rowNumber}`, row.amount, true)}</row>`; }).join("");
+  const lastColumn = columnName(headers.length); const lastRow = Math.max(headerRow, data.length + headerRow);
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:${lastColumn}${lastRow}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="${headerRow}" topLeftCell="A${headerRow + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="17.4"/><cols>${headers.map((_, index) => `<col min="${index + 1}" max="${index + 1}" width="22" customWidth="1"/>`).join("")}</cols><sheetData><row r="1">${cell("A1", title)}</row><row r="2">${cell("A2", aggregation)}</row><row r="3">${cell("A3", `행 그룹: ${rowBasis}`)}</row><row r="4">${cell("A4", `열 그룹: ${columnBasis}`)}</row><row r="5">${cell("A5", `적용 필터: ${selectedFilterSummary(request)}`)}</row><row r="${headerRow}">${headerCells}</row>${body}</sheetData><autoFilter ref="A${headerRow}:${lastColumn}${lastRow}"/><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/></worksheet>`;
 }
 async function filteredFacts(admin: ReturnType<typeof createClient>, batchId: string, request: ExportRequest) {
   const facts: Fact[] = [];
@@ -93,7 +107,7 @@ Deno.serve(async (request) => {
     const names = new Map((accounts.data ?? []).map((account) => [account.account_code, account.account_name]));
     const zip = await JSZip.loadAsync(await templateResponse.arrayBuffer());
     zip.file("xl/worksheets/sheet2.xml", rawSheetXml(facts, names));
-    zip.file("xl/worksheets/sheet1.xml", summarySheetXml(facts, names, ((job.request ?? {}) as ExportRequest).layout));
+    zip.file("xl/worksheets/sheet1.xml", summarySheetXml(facts, names, (job.request ?? {}) as ExportRequest));
     const table = await zip.file("xl/tables/table1.xml")?.async("string");
     if (!table) throw new Error("Excel 템플릿 구성이 올바르지 않습니다.");
     const lastRow = facts.length + 1;

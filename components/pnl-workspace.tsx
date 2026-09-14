@@ -33,7 +33,7 @@ const initialFieldExamples: Record<string, string[]> = {
 };
 const systemPresets: SavedPreset[] = [
   { id: "system-pnl", name: "기본 손익표", description: "손익 항목을 행으로, 기간을 열로 조회", isSystem: true, config: { rows: ["손익 항목"], columns: ["기간"], filters: ["제품", "브랜드", "고객구분", "사업장"] } },
-  { id: "system-product", name: "품목별 분기 손익", description: "제품별 손익을 분기별로 비교", isSystem: true, config: { rows: ["제품", "손익 항목"], columns: ["기간"], filters: ["브랜드", "고객구분", "사업장"] } },
+  { id: "system-brand", name: "브랜드별 분기 손익", description: "브랜드별 손익을 분기별로 비교", isSystem: true, config: { rows: ["브랜드", "손익 항목"], columns: ["기간"], filters: ["제품", "고객구분", "사업장"] } },
   { id: "system-site", name: "사업장별 수익성", description: "사업장별 매출과 영업이익을 비교", isSystem: true, config: { rows: ["사업장"], columns: ["측정치", "기간"], filters: ["제품", "브랜드", "고객구분"] } },
 ];
 const initialFilters: FilterState = { dataset: "전체", yearFrom: "", yearTo: "", selectedYears: [], product: [], brand: [], customer: [], site: [] };
@@ -64,8 +64,12 @@ function PivotFilter({ label, values, selected, onChange }: { label: string; val
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const visible = values.filter((value) => value.toLocaleLowerCase("ko").includes(search.toLocaleLowerCase("ko")));
+  const allVisibleSelected = visible.length > 0 && visible.every((value) => selected.includes(value));
   function toggle(value: string) { onChange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value]); }
-  return <div className="pivot-filter"><span>{label}</span><button type="button" className="pivot-filter-trigger" onClick={() => setOpen((current) => !current)}>{selected.length ? `${selected.length}개 선택` : "전체"}<b>⌄</b></button>{open && <div className="pivot-popover"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`${label} 검색`} /><div className="pivot-actions"><button type="button" onClick={() => onChange(visible)}>검색 결과 모두</button><button type="button" onClick={() => onChange([])}>전체로</button></div><div className="pivot-options">{visible.length ? visible.map((value) => <label key={value}><input type="checkbox" checked={selected.includes(value)} onChange={() => toggle(value)} /><span>{value}</span></label>) : <p>일치하는 선택지가 없습니다.</p>}</div></div>}</div>;
+  function toggleAllVisible() {
+    onChange(allVisibleSelected ? selected.filter((value) => !visible.includes(value)) : [...new Set([...selected, ...visible])]);
+  }
+  return <div className="pivot-filter"><span>{label}</span><button type="button" className="pivot-filter-trigger" onClick={() => setOpen((current) => !current)}>{selected.length ? `${selected.length}개 선택` : "전체"}<b>⌄</b></button>{open && <div className="pivot-popover"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`${label} 검색`} /><div className="pivot-options"><label className="pivot-option-all"><input type="checkbox" checked={allVisibleSelected} disabled={!visible.length} onChange={toggleAllVisible} /><span>모두</span></label>{visible.length ? visible.map((value) => <label key={value}><input type="checkbox" checked={selected.includes(value)} onChange={() => toggle(value)} /><span>{value}</span></label>) : <p>일치하는 선택지가 없습니다.</p>}</div></div>}</div>;
 }
 
 export function PnlWorkspace() {
