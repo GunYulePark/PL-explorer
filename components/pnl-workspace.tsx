@@ -331,8 +331,10 @@ export function PnlWorkspace() {
     if (!configuredClient || !file) { setUploadMessage(file ? "Supabase 연결 정보를 설정한 뒤 업로드할 수 있습니다." : "업로드할 XLSX 또는 CSV 파일을 선택하세요."); return; }
     if (!/\.(xlsx|csv)$/i.test(file.name)) { setUploadMessage("XLSX 또는 CSV 파일만 업로드할 수 있습니다."); return; }
     setUploadMessage("원본을 저장하는 중입니다…");
-    const safeFileName = file.name.replace(/[\\/]/g, "_");
-    const path = `raw/public/${crypto.randomUUID()}_${Date.now()}_${safeFileName}`;
+    // Keep the original filename for the dataset label, but never place it in
+    // the Storage key. This avoids provider-specific filename restrictions.
+    const extension = file.name.match(/\.(xlsx|csv)$/i)?.[0].toLowerCase() ?? ".xlsx";
+    const path = `raw/public/${crypto.randomUUID()}_${Date.now()}${extension}`;
     const upload = await configuredClient.storage.from("raw-data").upload(path, file, { upsert: false });
     if (upload.error) { setUploadMessage(`업로드 실패: ${upload.error.message}`); return; }
     const datasetName = file.name.replace(/\.[^.]+$/, "") || file.name;
