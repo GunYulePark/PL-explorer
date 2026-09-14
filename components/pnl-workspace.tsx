@@ -273,21 +273,23 @@ export function PnlWorkspace() {
   function swapAxes() { setLayout((current) => ({ ...current, rows: current.columns, columns: current.rows })); setActiveAxis((current) => current === "rows" ? "columns" : "rows"); }
   function applyPreset(preset: SavedPreset) { setLayout(ensureConfig(preset.config)); setPresetMessage(`‘${preset.name}’ 설정을 적용했습니다.`); }
   async function downloadExcel() {
-    const exportDatasetId = filters.dataset === "전체" && datasets.length === 1 ? datasets[0].id : filters.dataset;
-    if (!configuredClient || exportDatasetId === "전체") { setExportMessage("RAW 시트는 데이터베이스 한 개를 선택한 뒤 내려받을 수 있습니다."); return; }
+    const exportDatasetId = filters.dataset === "전체" ? (datasets.length > 1 ? undefined : null) : filters.dataset;
+    if (!configuredClient || exportDatasetId === undefined) { setExportMessage("여러 데이터베이스가 적재되어 있습니다. RAW와 일치하도록 데이터베이스 하나를 선택하세요."); return; }
     setExporting(true); setExportMessage(null); setUploadMessage(null);
-    const datasetName = datasets.find((dataset) => dataset.id === exportDatasetId)?.name ?? "선택 데이터베이스";
+    let datasetName = exportDatasetId ? datasets.find((dataset) => dataset.id === exportDatasetId)?.name ?? "선택 데이터베이스" : "전체";
     const yearRange = filters.selectedYears.length ? filters.selectedYears.sort().join(", ") : `${filters.yearFrom || "전체"}~${filters.yearTo || "전체"}`;
     try {
       const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
       const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
       if (!supabaseUrl || !publishableKey) throw new Error("Supabase 연결 정보를 찾을 수 없습니다.");
-      const rawResponse = await fetch(`${supabaseUrl}/functions/v1/pnl-raw-download?dataset=${encodeURIComponent(exportDatasetId)}`, { headers: { Authorization: `Bearer ${publishableKey}`, apikey: publishableKey } });
+      const sourceUrl = exportDatasetId ? `${supabaseUrl}/functions/v1/pnl-raw-download?dataset=${encodeURIComponent(exportDatasetId)}` : `${supabaseUrl}/functions/v1/pnl-raw-download`;
+      const rawResponse = await fetch(sourceUrl, { headers: { Authorization: `Bearer ${publishableKey}`, apikey: publishableKey } });
       if (!rawResponse.ok) {
         const problem = await rawResponse.json().catch(() => null) as { error?: string } | null;
         throw new Error(problem?.error ?? "서버에서 원본 파일을 가져오지 못했습니다.");
       }
       const sourceBlob = await rawResponse.blob();
+      datasetName = decodeURIComponent(rawResponse.headers.get("x-dataset-name") ?? datasetName);
       const sourceFilename = decodeURIComponent(rawResponse.headers.get("x-source-filename") ?? "RAW.xlsx");
       const ExcelJS = await import("exceljs");
       const workbook = new ExcelJS.Workbook();
