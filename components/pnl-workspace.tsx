@@ -33,9 +33,9 @@ const initialFieldExamples: Record<string, string[]> = {
   "국가": ["Supabase 연결 후 표시", "목록 중간 구간", "목록 75% 구간"],
 };
 const systemPresets: SavedPreset[] = [
-  { id: "system-pnl", name: "기본 손익표", description: "손익 항목을 행으로, 기간을 열로 조회", isSystem: true, config: { rows: ["손익 항목"], columns: ["기간"], filters: ["제품", "브랜드", "고객구분", "사업장"] } },
-  { id: "system-brand", name: "브랜드별 분기 손익", description: "브랜드별 손익을 분기별로 비교", isSystem: true, config: { rows: ["브랜드", "손익 항목"], columns: ["기간"], filters: ["제품", "고객구분", "사업장"] } },
-  { id: "system-site", name: "사업장별 수익성", description: "사업장별 매출과 영업이익을 비교", isSystem: true, config: { rows: ["사업장"], columns: ["측정치", "기간"], filters: ["제품", "브랜드", "고객구분"] } },
+  { id: "system-pnl", name: "기본 손익표", description: "기간별 손익 항목을 열로 조회", isSystem: true, config: { rows: ["기간"], columns: ["측정치"], filters: ["제품", "브랜드", "고객구분", "사업장"] } },
+  { id: "system-brand", name: "브랜드별 분기 손익", description: "연도·브랜드별 손익 항목을 열로 비교", isSystem: true, config: { rows: ["기간", "브랜드"], columns: ["측정치"], filters: ["제품", "고객구분", "사업장"] } },
+  { id: "system-site", name: "사업장별 수익성", description: "기간·사업장별 손익 항목을 열로 비교", isSystem: true, config: { rows: ["기간", "사업장"], columns: ["측정치"], filters: ["제품", "브랜드", "고객구분"] } },
 ];
 const initialFilters: FilterState = { dataset: "전체", yearFrom: "", yearTo: "", selectedYears: [], product: [], brand: [], customer: [], site: [] };
 const breakdownDimensions: Array<{ label: string; value: BreakdownDimension }> = [
@@ -63,7 +63,7 @@ function asRows(records: { account_code: StatementCode; amount: number | string 
 }
 function ensureConfig(value: unknown): LayoutConfig {
   const config = value as Partial<LayoutConfig> | null;
-  return { rows: Array.isArray(config?.rows) ? config.rows : ["손익 항목"], columns: Array.isArray(config?.columns) ? config.columns : ["기간"], filters: Array.isArray(config?.filters) ? config.filters : [] };
+  return { rows: Array.isArray(config?.rows) ? config.rows : ["기간"], columns: Array.isArray(config?.columns) ? config.columns : ["측정치"], filters: Array.isArray(config?.filters) ? config.filters : [] };
 }
 
 function PivotFilter({ label, values, selected, onChange }: { label: string; values: string[]; selected: string[]; onChange: (values: string[]) => void }) {
@@ -216,6 +216,21 @@ export function PnlWorkspace() {
       }));
   }, [activeBreakdownDimensions, displayPeriods, matrixRows, rows, selectedMeasures]);
   const reportGridStyle = { gridTemplateColumns: `minmax(180px, 1.5fr) repeat(${displayPeriods.length}, minmax(120px, 1fr))` };
+  const measureMatrixMode = layout.columns.includes("측정치");
+  const measureMatrixGroups = useMemo(() => {
+    const rowLabels = layout.rows.filter((label) => label === "기간" || breakdownDimensions.some((dimension) => dimension.label === label));
+    const groups = new Map<string, { values: string[]; totals: Map<StatementCode, number> }>();
+    matrixRows.forEach((record) => {
+      const values = rowLabels.map((label) => label === "기간" ? record.period_label : record.dimension_values[breakdownDimensions.find((dimension) => dimension.label === label)?.value ?? "product"] ?? "미지정");
+      const key = JSON.stringify(values);
+      const group = groups.get(key) ?? { values, totals: new Map<StatementCode, number>() };
+      group.totals.set(record.account_code, (group.totals.get(record.account_code) ?? 0) + Number(record.amount));
+      groups.set(key, group);
+    });
+    if (!groups.size) groups.set("[]", { values: [], totals: new Map<StatementCode, number>() });
+    return [...groups.values()].sort((left, right) => left.values.join(" › ").localeCompare(right.values.join(" › "), "ko")).map((group) => ({ label: group.values.length ? group.values.join(" › ") : "전체", amounts: selectedMeasures.map((code) => group.totals.has(code) ? group.totals.get(code) ?? null : null) }));
+  }, [layout.rows, matrixRows, selectedMeasures]);
+  const measureMatrixGridStyle = { gridTemplateColumns: `minmax(180px, 1.5fr) repeat(${selectedMeasures.length}, minmax(120px, 1fr))` };
 
   function updateFilter(key: keyof FilterState, value: string) {
     setFilters((current) => key === "dataset" ? { ...initialFilters, dataset: value } : { ...current, [key]: value });
@@ -284,7 +299,7 @@ export function PnlWorkspace() {
         p_year_to: filters.selectedYears.length ? null : (filters.yearTo ? Number(filters.yearTo) : null),
         p_products: filters.product.length ? filters.product : null, p_brands: filters.brand.length ? filters.brand : null,
         p_customers: filters.customer.length ? filters.customer : null, p_sites: filters.site.length ? filters.site : null,
-        p_layout: { rows: layout.rows, columns: layout.columns },
+        p_layout: { rows: layout.rows, columns: layout.columns, measures: selectedMeasures },
       });
       if (requestError || !jobId) throw new Error(requestError?.message ?? "Excel 생성 요청을 등록하지 못했습니다.");
       setExportMessage("필터 적용 RAW와 일반 Excel 요약표를 서버에서 즉시 생성 중입니다…");
@@ -345,7 +360,7 @@ export function PnlWorkspace() {
         <section className="filter-bar"><strong>필터</strong><label><span>데이터베이스</span><select value={filters.dataset} onChange={(event) => updateFilter("dataset", event.target.value)} disabled={!datasets.length}>{datasets.length ? datasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{datasetLabel(dataset)}</option>) : <option value="전체">적재된 데이터가 없습니다</option>}</select></label><div className="year-picker"><span>기간</span><div className="year-range"><select value={filters.yearFrom} onChange={(event) => updateFilter("yearFrom", event.target.value)}><option value="">시작 연도</option>{availableYears.map((year) => <option key={year} value={year}>{year}</option>)}</select><i>~</i><select value={filters.yearTo} onChange={(event) => updateFilter("yearTo", event.target.value)}><option value="">종료 연도</option>{availableYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></div><div className="year-select-actions"><small>개별 선택 또는 클릭 후 끌어 연속 선택</small>{filters.selectedYears.length > 0 && <button type="button" onClick={() => setFilters((current) => ({ ...current, selectedYears: [] }))}>개별 선택 해제</button>}</div><div className="year-checkboxes">{availableYears.map((year) => <button type="button" role="checkbox" aria-checked={filters.selectedYears.includes(year)} className={filters.selectedYears.includes(year) ? "checked" : ""} key={year} onPointerDown={(event) => startYearDrag(year, event)} onPointerEnter={(event) => extendYearDrag(year, event)} onClick={() => toggleYear(year)}>{filters.selectedYears.includes(year) ? "✓" : ""} {year}</button>)}</div></div>{filterDefinitions.filter((filter) => layout.filters.includes(filter.label)).map((filter) => <PivotFilter key={filter.key} label={filter.label} values={filter.values.filter((value) => value !== "전체")} selected={filters[filter.key]} onChange={(values) => updateMultiFilter(filter.key, values)} />)}<button className="filter-more" onClick={() => setLayout((current) => ({ ...current, filters: paletteItems.filter((item) => !["측정치", "기간"].includes(item)) }))}>필터 더보기</button></section>
         <section className="measure-picker"><div className="measure-picker-heading"><div><strong>조회 손익 항목</strong><span>행·열 배치와 별개로 조회할 측정치를 선택합니다.</span></div><button type="button" className="measure-reset" onClick={() => setSelectedMeasures(statementOrder.map((item) => item.code))}>전체 선택</button></div><div className="measure-options">{statementOrder.map(({ code, label }) => <label className={selectedMeasures.includes(code) ? "measure-option checked" : "measure-option"} key={code}><input type="checkbox" checked={selectedMeasures.includes(code)} onChange={() => toggleMeasure(code)} /><span>{label}</span></label>)}</div><p>{selectedMeasures.length ? `${selectedMeasures.length}개 항목 선택됨` : "최소 1개 이상 선택하세요"}</p></section>
         <section className="search-panel"><div><strong>조회 설계</strong><span>행과 열은 비교 기준, 손익 항목은 별도 선택으로 조합합니다.</span></div><button className="detail-search">상세검색</button></section>
-        <section className="report-panel"><div className="report-heading"><div><p>미리보기</p><h2>{activePreset?.name ?? "사용자 지정 분석"}</h2></div><div className="report-meta"><span>{layout.rows.join(" · ") || "행 없음"}</span><b>×</b><span>{layout.columns.join(" · ") || "열 없음"}</span></div></div><div className="report-table"><div className="report-row report-header" style={reportGridStyle}><span>{activeBreakdownDimensions.length ? `${activeBreakdownDimensions.map((dimension) => dimension.label).join(" › ")} › 손익 항목` : "손익 항목"}</span>{displayPeriods.map((period) => <span key={period.label}>{period.label}</span>)}</div>{matrixGroups.map((group) => <div className="report-group" key={group.key}>{activeBreakdownDimensions.length > 0 && <div className="report-row report-group-header" style={reportGridStyle}><strong>{group.label}</strong></div>}{group.rows.map((row) => <div className={row.code === "operating_profit" ? "report-row strong" : "report-row"} style={reportGridStyle} key={`${group.key}-${row.code}`}><span>{row.label}</span>{row.amounts.map((value, index) => <b key={`${row.code}-${index}`}>{loading ? "불러오는 중…" : amount(value)}</b>)}</div>)}</div>)}</div><footer>{source === "sample" ? "공개 체험용 예시 데이터를 표시 중입니다." : "Supabase 적재 데이터를 기준으로 표시 중입니다."}<span>영업이익률 {operatingMargin ?? "-"}%</span></footer></section>
+        <section className="report-panel"><div className="report-heading"><div><p>미리보기</p><h2>{activePreset?.name ?? "사용자 지정 분석"}</h2></div><div className="report-meta"><span>{layout.rows.join(" · ") || "행 없음"}</span><b>×</b><span>{layout.columns.join(" · ") || "열 없음"}</span></div></div><div className="report-table">{measureMatrixMode ? <><div className="report-row report-header" style={measureMatrixGridStyle}><span>{layout.rows.filter((label) => label === "기간" || breakdownDimensions.some((dimension) => dimension.label === label)).join(" › ") || "분류"}</span>{visibleRows.map((row) => <span key={row.code}>{row.label}</span>)}</div>{measureMatrixGroups.map((group) => <div className="report-row" style={measureMatrixGridStyle} key={group.label}><span>{group.label}</span>{group.amounts.map((value, index) => <b key={`${group.label}-${selectedMeasures[index]}`}>{loading ? "불러오는 중…" : amount(value)}</b>)}</div>)}</> : <><div className="report-row report-header" style={reportGridStyle}><span>{activeBreakdownDimensions.length ? `${activeBreakdownDimensions.map((dimension) => dimension.label).join(" › ")} › 손익 항목` : "손익 항목"}</span>{displayPeriods.map((period) => <span key={period.label}>{period.label}</span>)}</div>{matrixGroups.map((group) => <div className="report-group" key={group.key}>{activeBreakdownDimensions.length > 0 && <div className="report-row report-group-header" style={reportGridStyle}><strong>{group.label}</strong></div>}{group.rows.map((row) => <div className={row.code === "operating_profit" ? "report-row strong" : "report-row"} style={reportGridStyle} key={`${group.key}-${row.code}`}><span>{row.label}</span>{row.amounts.map((value, index) => <b key={`${row.code}-${index}`}>{loading ? "불러오는 중…" : amount(value)}</b>)}</div>)}</div>)}</>}</div><footer>{source === "sample" ? "공개 체험용 예시 데이터를 표시 중입니다." : "Supabase 적재 데이터를 기준으로 표시 중입니다."}<span>영업이익률 {operatingMargin ?? "-"}%</span></footer></section>
       <section className="upload-inline"><div><strong>RAW 업로드</strong><span>로그인 없이 XLSX 또는 CSV 원본을 업로드하면 몇 분 내 손익 데이터까지 자동 적재합니다.</span></div><label className="file-label"><input type="file" accept=".xlsx,.csv" onChange={selectFile} /><em>{file?.name ?? "XLSX 또는 CSV 파일 선택"}</em></label><button className="primary-button" onClick={uploadRaw}>업로드 및 적재</button>{uploadMessage && <p>{uploadMessage}</p>}</section>
       </section>
 

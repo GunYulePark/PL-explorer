@@ -13,7 +13,7 @@ const corsHeaders = {
   "Vary": "Origin",
 };
 
-type ExportRequest = { years?: number[]; year_from?: number | null; year_to?: number | null; products?: string[]; brands?: string[]; customers?: string[]; sites?: string[]; layout?: { rows?: string[]; columns?: string[] } };
+type ExportRequest = { years?: number[]; year_from?: number | null; year_to?: number | null; products?: string[]; brands?: string[]; customers?: string[]; sites?: string[]; layout?: { rows?: string[]; columns?: string[]; measures?: string[] } };
 type Fact = { fiscal_year: number | null; fiscal_quarter: string | null; product_name: string | null; brand: string | null; customer_group_name: string | null; site_name: string | null; account_code: string; amount: number | string };
 
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" } }); }
@@ -48,24 +48,41 @@ function selectedFilterSummary(request: ExportRequest) {
   }
   return parts.length ? parts.join(" / ") : "추가 필터 없음";
 }
-function summarySheetXml(facts: Fact[], names: Map<string, string>, request: ExportRequest) {
-  const layout = request.layout;
-  const rowFields = summaryFields(layout?.rows); const columnFields = summaryFields(layout?.columns).filter((field) => !rowFields.some((row) => row.key === field.key));
-  const fields = [...(rowFields.length ? rowFields : [{ key: "account_name", label: "손익 항목" }]), ...(columnFields.length ? columnFields : [{ key: "period", label: "기간" }])];
-  const totals = new Map<string, { values: string[]; amount: number }>();
-  facts.forEach((fact) => { const values = fields.map((field) => summaryValue(fact, names, field.key)); const key = values.join("\u0001"); const current = totals.get(key) ?? { values, amount: 0 }; current.amount += Number(fact.amount); totals.set(key, current); });
-  const data = [...totals.values()].sort((left, right) => left.values.join("\u0001").localeCompare(right.values.join("\u0001"), "ko"));
-  const headers = [...fields.map((field) => field.label), "금액"];
+type SummaryRow = { values: unknown[]; numericColumns: Set<number> };
+function summarySheetDocument(request: ExportRequest, headers: string[], data: SummaryRow[], rowBasis: string, columnBasis: string, aggregation: string) {
   const cell = (reference: string, value: unknown, numeric = false) => numeric ? `<c r="${reference}"><v>${escapeXml(value)}</v></c>` : `<c r="${reference}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`;
-  const rowBasis = (rowFields.length ? rowFields : [{ label: "손익 항목" }]).map((field) => field.label).join(" > ");
-  const columnBasis = (columnFields.length ? columnFields : [{ label: "기간" }]).map((field) => field.label).join(" > ");
   const title = "P/L Explorer 요약";
-  const aggregation = `합계 기준: 필터 적용 후 RAW 시트의 amount를 합산하며, 같은 행·열 기준 조합은 한 행으로 집계합니다.`;
   const headerRow = 7;
   const headerCells = headers.map((value, index) => cell(`${columnName(index + 1)}${headerRow}`, value)).join("");
-  const body = data.map((row, index) => { const rowNumber = index + headerRow + 1; return `<row r="${rowNumber}">${row.values.map((value, column) => cell(`${columnName(column + 1)}${rowNumber}`, value)).join("")}${cell(`${columnName(headers.length)}${rowNumber}`, row.amount, true)}</row>`; }).join("");
+  const body = data.map((row, index) => { const rowNumber = index + headerRow + 1; return `<row r="${rowNumber}">${row.values.map((value, column) => cell(`${columnName(column + 1)}${rowNumber}`, value ?? "", row.numericColumns.has(column))).join("")}</row>`; }).join("");
   const lastColumn = columnName(headers.length); const lastRow = Math.max(headerRow, data.length + headerRow);
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:${lastColumn}${lastRow}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="${headerRow}" topLeftCell="A${headerRow + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="17.4"/><cols>${headers.map((_, index) => `<col min="${index + 1}" max="${index + 1}" width="22" customWidth="1"/>`).join("")}</cols><sheetData><row r="1">${cell("A1", title)}</row><row r="2">${cell("A2", aggregation)}</row><row r="3">${cell("A3", `행 그룹: ${rowBasis}`)}</row><row r="4">${cell("A4", `열 그룹: ${columnBasis}`)}</row><row r="5">${cell("A5", `적용 필터: ${selectedFilterSummary(request)}`)}</row><row r="${headerRow}">${headerCells}</row>${body}</sheetData><autoFilter ref="A${headerRow}:${lastColumn}${lastRow}"/><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/></worksheet>`;
+}
+function summarySheetXml(facts: Fact[], names: Map<string, string>, request: ExportRequest) {
+  const layout = request.layout;
+  const rowFields = summaryFields(layout?.rows).filter((field) => field.key !== "account_name");
+  if (layout?.columns?.includes("측정치")) {
+    const measureCodes = (layout.measures?.filter((code) => statementCodes.includes(code)) ?? statementCodes);
+    const activeMeasures = measureCodes.length ? measureCodes : statementCodes;
+    const fields = rowFields.length ? rowFields : [{ key: "period" as const, label: "기간" }];
+    const totals = new Map<string, { values: string[]; amounts: Map<string, number> }>();
+    facts.forEach((fact) => {
+      const values = fields.map((field) => summaryValue(fact, names, field.key)); const key = values.join("\u0001");
+      const current = totals.get(key) ?? { values, amounts: new Map<string, number>() };
+      current.amounts.set(fact.account_code, (current.amounts.get(fact.account_code) ?? 0) + Number(fact.amount)); totals.set(key, current);
+    });
+    const data = [...totals.values()].sort((left, right) => left.values.join("\u0001").localeCompare(right.values.join("\u0001"), "ko")).map((row) => ({
+      values: [...row.values, ...activeMeasures.map((code) => row.amounts.get(code) ?? null)],
+      numericColumns: new Set(activeMeasures.flatMap((code, index) => row.amounts.has(code) ? [fields.length + index] : [])),
+    }));
+    return summarySheetDocument(request, [...fields.map((field) => field.label), ...activeMeasures.map((code) => names.get(code) ?? code)], data, fields.map((field) => field.label).join(" > "), "측정치", "합계 기준: 필터 적용 후 RAW 시트의 amount를 합산하며, 각 손익 항목은 별도 열에 표시합니다.");
+  }
+  const columnFields = summaryFields(layout?.columns).filter((field) => !rowFields.some((row) => row.key === field.key));
+  const fields = [...(rowFields.length ? rowFields : [{ key: "account_name" as const, label: "손익 항목" }]), ...(columnFields.length ? columnFields : [{ key: "period" as const, label: "기간" }])];
+  const totals = new Map<string, { values: string[]; amount: number }>();
+  facts.forEach((fact) => { const values = fields.map((field) => summaryValue(fact, names, field.key)); const key = values.join("\u0001"); const current = totals.get(key) ?? { values, amount: 0 }; current.amount += Number(fact.amount); totals.set(key, current); });
+  const data = [...totals.values()].sort((left, right) => left.values.join("\u0001").localeCompare(right.values.join("\u0001"), "ko")).map((row) => ({ values: [...row.values, row.amount], numericColumns: new Set([fields.length]) }));
+  return summarySheetDocument(request, [...fields.map((field) => field.label), "금액"], data, (rowFields.length ? rowFields : [{ label: "손익 항목" }]).map((field) => field.label).join(" > "), (columnFields.length ? columnFields : [{ label: "기간" }]).map((field) => field.label).join(" > "), "합계 기준: 필터 적용 후 RAW 시트의 amount를 합산하며, 같은 행·열 기준 조합은 한 행으로 집계합니다.");
 }
 async function filteredFacts(admin: ReturnType<typeof createClient>, batchId: string, request: ExportRequest) {
   const facts: Fact[] = [];
